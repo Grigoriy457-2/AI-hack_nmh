@@ -142,29 +142,47 @@ Operator может любой переход из таблицы. Каждый 
 
 ### `search_iterations.queries_json`
 ```json
-[{"agent": "web", "query": "хлопок Чертаново 14:30", "results": 6},
- {"agent": "max_chats", "query": "хлопок OR взрыв Чертаново", "results": 9}]
+[{"agent": "web", "query": "хлопок Чертаново 14:30", "results": 6, "new": 3},
+ {"agent": "max_chats", "query": "хлопок OR взрыв Чертаново", "results": 9, "new": 9}]
 ```
+`results` — сколько вернул агент, `new` — сколько новых источников добавлено (дедуп по url /
+сообщению между итерациями); `search_iterations.results_count` = сумма `new`.
 `rationale` — текст LLM, почему такие гипотезы (для 2-й и 3-й итерации — «что нашли и что ищем дальше»).
 
-### `reports.report_json` (9 разделов, порядок фиксирован)
+### `reports.report_json` (9 разделов исходного плана, порядок фиксирован) — ред. DEV-AI 2026-11-14
 ```json
-{"version": 1, "generated_at": "…", "title": "Хлопок у жилого дома в Чертанове",
+{"version": 1, "generated_at": "…", "title": "Возгорание автомобиля у жилого дома в Чертанове",
  "sections": [
-   {"key": "summary", "title": "Коротко", "text": "…", "items": []},
-   {"key": "facts", "title": "Что известно (что/где/когда)", "text": "", "items": [ITEM]},
-   {"key": "timeline", "title": "Хронология", "items": [ITEM]},
-   {"key": "confirmed", "title": "Подтверждено", "items": [ITEM]},
-   {"key": "unconfirmed", "title": "Не подтверждено / слухи", "items": [ITEM]},
-   {"key": "contradictions", "title": "Противоречия", "items": [ITEM]},
-   {"key": "sources", "title": "Ключевые источники и первоисточники", "items": [ITEM]},
-   {"key": "media", "title": "Медиа", "items": [ITEM]},
-   {"key": "to_verify", "title": "Что проверить и кому позвонить", "items": [ITEM]}
- ]}
+   {"key": "summary",        "title": "Краткое описание ситуации",      "text": "…", "items": []},
+   {"key": "timeline",       "title": "Хронология",                     "text": "", "items": [ITEM]},
+   {"key": "facts",          "title": "Найденная информация",           "text": "", "items": [ITEM]},
+   {"key": "sources",        "title": "Источники",                      "text": "Ключевые источники. Всего найдено: 34…", "items": [ITEM]},
+   {"key": "confirmed",      "title": "Подтверждённые сведения",        "text": "", "items": [ITEM]},
+   {"key": "unconfirmed",    "title": "Неподтверждённая информация",    "text": "", "items": [ITEM]},
+   {"key": "contradictions", "title": "Противоречия",                   "text": "", "items": [ITEM]},
+   {"key": "media",          "title": "Фото и видео",                   "text": "", "items": [ITEM]},
+   {"key": "to_verify",      "title": "Что ещё необходимо проверить",   "text": "", "items": [ITEM]}
+ ],
+ "contacts": [CONTACT],          // блок «Кому позвонить» (без телефонов!)
+ "stats": {"iterations": 3, "sources_total": 34, "primary": 27, "duplicates": 7,
+           "by_kind": {"web": 6, "max_chat": 22, "official": 3, "media": 3},
+           "media": 4, "possibly_old_media": 1, "contacts": 8},
+ "channel": "Москва Срочно"}     // или null
 ```
 `ITEM = {"id": "timeline-1", "text": "14:31 — жители сообщают о хлопке", "source_ids": [12, 15],
-"state": "confirmed|unconfirmed|false|null", "time": "14:31"|null}`.
+"state": "confirmed|unconfirmed|false|null", "time": "14:31"|null}` + необязательные поля:
+`claim` (confirmed/unconfirmed — формулировка для поста); в `sources`: `kind`, `url`, `published_at`,
+`uniqueness`, `duplicates` (размер кластера − 1), `is_primary`, `note` (первая фраза сниппета);
+в `media`: `media_id` (`media_items.id`), `possibly_old` (у «старых» `state="false"`).
 `source_ids` — `sources.id` этого расследования. Пустые разделы допустимы (`items: []`).
+Раздел `sources` — ключевые первоисточники (официальные, СМИ/ТГ, медиа + 2 важных чата, ≤ 12);
+полный список с дублями — `GET /sources`. В `to_verify` в конце — до 4 строк «Позвонить очевидцу: …».
+
+`CONTACT = {"source_id", "author_external_id", "name", "has_phone": bool, "username", "quote",
+"chat_title", "sent_at" (UTC ISO), "time_msk": "14:31", "message_url", "uniqueness_score", "messages": 2}` —
+один на автора (первое уникальное важное сообщение), сначала с телефоном. **Номер телефона в
+report_json НЕ кладётся** (справку видят все роли); телефон отдаёт только `GET /contacts`
+(producer/operator) из `author_profiles` — профили к этому моменту уже запрошены пайплайном.
 
 ### `drafts.claims_json`
 ```json
@@ -279,4 +297,9 @@ JS — `app/static/app.js` (опрос прогресса, вкладки, кл�
 
 Формат: `- [ ] YYYY-MM-DD, ЗОНА, файл: что нужно и зачем` → тимлид отмечает `[x]` и вносит правку.
 
-- (пока пусто)
+- [x] 2026-11-14, DEV-FRONTEND, app/main.py: обработчик HTTPException для НЕ-`/api` путей с кодами 403/404 рендерить `error.html` (сейчас отдаётся JSON). Пока страницы проверяют роли сами (`has_role` внутри обработчика) и рендерят `error.html` с кодом 403/404, поэтому `require_role` в pages.py не используется. **Сделано тимлидом**: `app/main.py:_html_error`.
+- [x] 2026-11-14, DEV-FRONTEND, §7 (к сведению, только зона pages.py): добавлены `GET /investigations/{id}/progress.json` (формат = ProgressOut, резерв для app.js, если `/api/.../progress` отдаёт не 200), необязательное поле `next` в форме `POST /login` (быстрая смена роли из шапки), `GET /login?switch=1` (показать логин уже вошедшему), `GET /?view=producer|editor|smm` (оператор смотрит дашборд другой роли), `POST /investigations/{id}/facts` с `Accept: application/json` отвечает JSON (отметка факта без перезагрузки). Jinja-глобалы сверх контракта: `STATUS_ORDER`, `STATUS_FLOW`, `TRANSITION_BUTTONS`, `asset()`; фильтры: `dur`, `ago`, `minutes`, `status_label`, `role_label`, `kind_label`, `fact_label`, `safe_url`.
+- [x] 2026-11-14, DEV-AI, §5 `report_json` (зона формата DEV-AI, правка уже внесена выше): порядок и названия разделов приведены к 9 разделам исходного плана — `summary, timeline, facts, sources, confirmed, unconfirmed, contradictions, media, to_verify` («Краткое описание ситуации», «Хронология», «Найденная информация», «Источники», «Подтверждённые сведения», «Неподтверждённая информация», «Противоречия», «Фото и видео», «Что ещё необходимо проверить»); добавлены верхнеуровневые `contacts` (без телефонов) и `stats`, необязательные поля ITEM. **QA**: обновить `tests/nf_helpers.py:REPORT_SECTION_KEYS` (сейчас из-за порядка падают 3 теста: e2e, test_report_9_sections_and_source_ids, test_generic_lead; с новым порядком проходят). Фронт итерирует `sections` — правок не нужно.
+- [x] 2026-11-14, DEV-AI → DEV-BACKEND (к сведению, уже используется в `max/mock.py`): единый источник демо-данных MAX — `app/ai/mock_data.py`: `SCENARIO_MAX_CHATS` (5 чатов), `SCENARIO_MAX_MESSAGES` (40 сообщений `m01…m40`: 22 релевантных сценарию, из них дубли/пересылки m03, m09, m10, m17, m19; 18 мусорных, в т.ч. «ловушки» m27, m38), `SCENARIO_MAX_PROFILES` (у части авторов телефона нет), `scenario_max_messages(anchor)`, `scenario_event_time()`/`set_scenario_anchor()`. MockLLM (релевантность, важность, справка) опирается на эти тексты и external_id — менять их только вместе с DEV-AI. `sources.url` для MAX — `max://chat/{chat_external_id}/{message_external_id}` (`mock_data.max_message_url`).
+- [x] 2026-11-14, DEV-AI, §4 (к сведению): `pipeline.progress_update(...)` получил необязательные kw `note=` (note этапа) и `done=True` (state=done); `queries_json[]` получил поле `new`; `SearchProvider` дополнен `SerperSearchProvider` (SEARCH_PROVIDER=serper). Если в БД нет ни одного сообщения MAX, пайплайн один раз вызывает `poller.sync_once` перед поиском. Демо-паузы пайплайна: только при MockLLM и `PIPELINE_INLINE=false` (~13 с), отключаются `pipeline.DEMO_DELAY_SCALE = 0`.
+- [x] 2026-11-14, TEAM LEAD, app/schemas.py: `MaxChatUpdate` — оба поля необязательны (`enabled`, новое `district`); PATCH меняет только переданные.

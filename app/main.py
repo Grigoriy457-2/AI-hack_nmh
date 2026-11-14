@@ -71,6 +71,27 @@ async def lifespan(app: FastAPI):
         await db.dispose()
 
 
+_DEFAULT_ERROR_MESSAGES = {
+    403: "У вашей роли нет доступа к этой странице.",
+    404: "Страница или объект не найдены.",
+}
+
+
+async def _html_error(request: Request, exc: StarletteHTTPException):
+    """403/404 на HTML-страницах -> error.html (запрос DEV-FRONTEND, CONTRACTS §9)."""
+    from app.auth import COOKIE_NAME, read_session_token
+    from app.models import User
+    from app.routers.pages import _error
+
+    detail = exc.detail if isinstance(exc.detail, str) else ""
+    if not detail or detail in ("Not Found", "Forbidden"):
+        detail = _DEFAULT_ERROR_MESSAGES[exc.status_code]
+    async with db.SessionLocal() as session:
+        uid = read_session_token(request.cookies.get(COOKIE_NAME))
+        user = await session.get(User, uid) if uid is not None else None
+        return await _error(request, user, session, exc.status_code, detail)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -83,8 +104,15 @@ def create_app() -> FastAPI:
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc(request: Request, exc: StarletteHTTPException):
         # Страницы: неавторизованный -> /login. API — обычный JSON.
-        if exc.status_code == 401 and not request.url.path.startswith("/api"):
+        path = request.url.path
+        is_page = not path.startswith(("/api", "/static"))
+        if exc.status_code == 401 and is_page:
             return RedirectResponse("/login", status_code=303)
+        if exc.status_code in (403, 404) and is_page:
+            try:
+                return await _html_error(request, exc)
+            except Exception:  # noqa: BLE001  страница ошибки не должна ронять ответ
+                log.exception("error.html render failed")
         return await http_exception_handler(request, exc)
 
     @app.exception_handler(NotImplementedError)
