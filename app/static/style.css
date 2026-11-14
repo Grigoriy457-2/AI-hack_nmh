@@ -1,0 +1,8 @@
+/* NEWSFLOW AI — единственный CSS-файл проекта. Зона DEV-FRONTEND. */
+:root {
+  --nf-header-bg: #111827;
+  --nf-bg: #f6f7f9;
+  --nf-text: #111827;
+  --nf-accent: #2563eb;
+}
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--nf-bg); color: var(--nf-text); }
