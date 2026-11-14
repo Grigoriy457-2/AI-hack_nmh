@@ -1,0 +1,88 @@
+{% set default_stages = [
+  {'key': 'input', 'title': 'Разбор зацепки'},
+  {'key': 'search', 'title': 'Цепочка поиска'},
+  {'key': 'intelligence', 'title': 'Анализ и уникальность'},
+  {'key': 'media', 'title': 'Поиск медиа'},
+  {'key': 'dna', 'title': 'Channel DNA'},
+  {'key': 'report', 'title': 'Справка и черновик'},
+] %}
+{% set stages = progress.get('stages') or default_stages %}
+{% set pstate = progress.get('state') or ('running' if st == 'researching' else 'idle') %}
+{% set percent = progress.get('percent') or (100 if pstate == 'done' else 0) %}
+
+<div id="progress-root" data-inv="{{ inv.id }}" data-status="{{ st }}" data-state="{{ pstate }}"
+     data-poll="{{ '1' if st == 'researching' and pstate not in ('done', 'error') else '0' }}">
+
+  {% if st == 'new' and not progress %}
+    <div class="empty" style="margin-bottom:16px"><b>Исследование ещё не запускалось</b>
+      {% if has_role(user, Role.producer) %}Нажмите «Запустить NEWSFLOW» вверху страницы.{% else %}Его запускает продюсер.{% endif %}</div>
+  {% endif %}
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="progress-top">
+      <div class="progress-big">
+        <div class="progress-big__bar {{ 'is-done' if pstate == 'done' }}"><i id="pg-bar" style="width: {{ percent }}%"></i></div>
+        <div class="progress-big__label">
+          <span id="pg-state">
+            {%- if pstate == 'done' -%}Исследование завершено{% if progress.get('finished_at') %} в {{ progress.get('finished_at')|dt('time') }}{% endif %}
+            {%- elif pstate == 'error' -%}Ошибка: {{ progress.get('error') or 'см. лог' }}
+            {%- elif pstate == 'running' -%}NEWSFLOW работает…
+            {%- else -%}Ожидание запуска{%- endif -%}
+          </span>
+          <b id="pg-percent">{{ percent }}%</b>
+        </div>
+      </div>
+      {% if progress.get('started_at') %}<div class="small muted">Старт: {{ progress.get('started_at')|dt('seconds') }}</div>{% endif %}
+    </div>
+
+    <div class="stages" id="pg-stages">
+      {% for s in stages %}
+      <div class="stage is-{{ s.get('status') or 'pending' }}" data-stage="{{ s.get('key') }}">
+        <span class="stage__icon"></span>
+        <div class="stage__n">ЭТАП {{ loop.index }}</div>
+        <div class="stage__title">{{ s.get('title') or s.get('key') }}</div>
+        <div class="stage__note">{{ s.get('note') or '' }}</div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="section-title">Живой лог</div>
+    <div class="log" id="pg-log" aria-live="polite">
+      {% for row in progress.get('log') or [] %}
+        <div class="log__row {{ row.get('level') or 'info' }}"><span class="log__ts">{{ row.get('ts')|dt('seconds') }}</span><span class="log__stage">{{ row.get('stage') or '' }}</span><span class="log__msg">{{ row.get('message') }}</span></div>
+      {% else %}
+        <div class="log__empty">{{ 'Ждём первых событий от пайплайна…' if st == 'researching' else 'Лог пуст.' }} {% if st == 'researching' %}<span class="log__cursor"></span>{% endif %}</div>
+      {% endfor %}
+    </div>
+    <div class="small muted hidden" id="pg-api-note" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <div class="card__head">
+      <h3>Цепочка поиска (CHAIN SEARCH)</h3>
+      <span class="muted small">AI сам порождает следующие гипотезы — до 3 итераций</span>
+    </div>
+    <div class="chain" id="pg-chain">
+      {% for it in iterations %}
+      <div class="iter">
+        <div class="iter__n">{{ it.n }}</div>
+        <div class="iter__card">
+          <div class="iter__head"><b>Итерация {{ it.n }}</b><span class="muted small">{{ (it.queries_json or [])|length }} запросов · {{ it.results_count }} результатов · {{ it.created_at|dt('seconds') }}</span></div>
+          {% if it.rationale %}<div class="rationale">{{ it.rationale }}</div>{% endif %}
+          <div class="queries">
+            {% for q in it.queries_json or [] %}
+            <div class="query" title="{{ q.get('query') }}">
+              <span class="query__agent query__agent--{{ q.get('agent') }}">{{ AGENT_LABELS.get(q.get('agent'), q.get('agent')) }}</span>
+              <span class="query__q">{{ q.get('query') }}</span>
+              <span class="query__n">{{ q.get('results', '') }}</span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="empty" id="pg-chain-empty"><b>Итераций пока нет</b>Как только NEWSFLOW сформулирует первые гипотезы, здесь появится дерево поиска.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>

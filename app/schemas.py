@@ -60,7 +60,10 @@ class MaxChatOut(ORM):
 
 
 class MaxChatUpdate(BaseModel):
-    enabled: bool
+    """PATCH: передаются только изменяемые поля."""
+
+    enabled: bool | None = None
+    district: str | None = Field(default=None, max_length=128)
 
 
 class SyncResult(BaseModel):

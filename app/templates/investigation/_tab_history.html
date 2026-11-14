@@ -1,0 +1,50 @@
+{% from "partials/_macros.html" import status_badge, fact_badge %}
+<div class="grid grid-2" style="align-items:start">
+  <div class="card">
+    <h3>История статусов</h3>
+    {% if history %}
+    <div class="timeline">
+      {% for h in history %}
+      <div class="tl {{ 'tl--system' if not h.user_id }}">
+        <div class="tl__head">
+          {% if h.from_status %}{{ status_badge(h.from_status) }} <span class="muted">→</span>{% endif %}
+          {{ status_badge(h.to_status) }}
+        </div>
+        <div class="tl__who">{{ h.created_at|dt('full') }} · {% if h.user %}{{ h.user.name }} ({{ h.user.role|role_label }}){% else %}система NEWSFLOW{% endif %}</div>
+        {% if h.comment %}<div class="tl__comment">{{ h.comment }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+      <div class="empty">Переходов пока не было.</div>
+    {% endif %}
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <h3>Отметки фактов людьми</h3>
+      {% if fact_marks %}
+        {% for m in fact_marks|reverse %}
+          <div class="fb-item">
+            {{ fact_badge(m.state) }}
+            <div class="small">
+              {{ m.fact_text }}
+              <div class="muted">{{ users_by_id.get(m.user_id).name if users_by_id.get(m.user_id) else '—' }} · {{ m.created_at|dt }}{% if m.comment %} · {{ m.comment }}{% endif %}</div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="muted small">Никто ещё не отмечал факты. Продюсер и редактор могут делать это во вкладке «Справка» и в редакторе.</div>
+      {% endif %}
+    </div>
+    <div class="card">
+      <h3>Версии черновика</h3>
+      {% if drafts %}
+        {% for d in drafts %}
+        <div class="fb-item"><span class="badge {{ 'badge--accent' if d.author_kind|ev == 'ai' else 'badge--ok' }}">v{{ d.version }}</span>
+          <div class="small">{{ 'AI-черновик' if d.author_kind|ev == 'ai' else 'Правка редактора' }}{% if users_by_id.get(d.author_user_id) %} · {{ users_by_id.get(d.author_user_id).name }}{% endif %}<div class="muted">{{ d.created_at|dt('full') }}</div></div></div>
+        {% endfor %}
+      {% else %}<div class="muted small">Нет версий.</div>{% endif %}
+    </div>
+  </div>
+</div>

@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import status_badge, hint, avatar %}
+{% block title %}#{{ inv.id }} {{ inv.title }}{% endblock %}
+{% block content %}
+{% set st = inv.status|ev %}
+{% set report_items = namespace(n=0) %}
+{% if report %}{% for sec in report.get('sections') or [] %}{% set report_items.n = report_items.n + (sec.get('items') or [])|length %}{% endfor %}{% endif %}
+
+{% call hint('investigation') %}
+  {% if st == 'researching' %}смотрите, как NEWSFLOW в реальном времени проходит этапы и строит <b>цепочку поисковых гипотез</b>. Когда исследование закончится, страница сама откроет справку.
+  {% elif has_role(user, Role.producer) and st == 'report_ready' %}проверьте <b>Справку</b> (у каждого пункта — ссылки на источники; пометьте факты кнопками), загляните в <b>«Кому позвонить»</b> и <b>Источники</b> (дубли свёрнуты). Потом — «Передать на редактуру» и оценка «норм / стрём» справа.
+  {% elif st == 'editing' and has_role(user, Role.editor) %}откройте <b>редактор</b> кнопкой «Редактировать черновик» — там AI-версия, ваша правка и живой diff.
+  {% elif st == 'ready' and has_role(user, Role.smm) %}возьмите текст во вкладке <b>Черновик</b>, опубликуйте в канале и нажмите «Опубликовано».
+  {% else %}переключайте вкладки: прогресс и цепочка поиска, справка с источниками, первоисточники и дубли, очевидцы, медиа, черновик и история статусов.{% endif %}
+{% endcall %}
+
+<section class="inv-head">
+  <div class="inv-head__top">
+    <div style="flex:1;min-width:260px">
+      <div class="row">{{ status_badge(inv.status, 'lg') }}<span class="muted small">Расследование #{{ inv.id }}</span></div>
+      <h1>{{ inv.title }}</h1>
+      <div class="inv-head__meta">
+        {% if inv.channel %}<span>Канал: <b>{{ inv.channel.name }}</b></span>{% endif %}
+        {% if inv.producer %}<span>Продюсер: {{ inv.producer.name }}</span>{% endif %}
+        {% if inv.editor %}<span>Редактор: {{ inv.editor.name }}</span>{% endif %}
+        <span title="{{ inv.created_at|dt('full') }}">Создано {{ inv.created_at|dt }}</span>
+        {% if inv.report_ready_at %}<span>Справка: {{ inv.report_ready_at|dt }}</span>{% endif %}
+      </div>
+    </div>
+    <div class="actions" id="transition-actions">
+      {% if st in ('editing',) and has_role(user, Role.editor) %}
+        <a class="btn btn--primary" href="/investigations/{{ inv.id }}/edit">Редактировать черновик →</a>
+      {% endif %}
+      {% for to in allowed_transitions %}
+        {% set btn = TRANSITION_BUTTONS.get((inv.status, to), (to|status_label, 'ghost')) %}
+        <form method="post" action="/investigations/{{ inv.id }}/transition" {% if to|ev == 'rejected' or (st == 'editing' and to|ev == 'report_ready') or (st == 'ready' and to|ev == 'editing') %}data-ask-comment="{{ 'Почему тема не подходит? (комментарий попадёт в историю)' if to|ev == 'rejected' else 'Комментарий: что нужно поправить?' }}"{% endif %}>
+          <input type="hidden" name="to_status" value="{{ to|ev }}">
+          <input type="hidden" name="comment" value="">
+          <button type="submit" class="btn btn--{{ btn[1] }}">{{ btn[0] }}</button>
+        </form>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="lead-quote">«{{ inv.lead_text }}»</div>
+  {% if entities %}
+  <div class="entities">
+    {% if entities.get('event_type') %}<span class="entity"><b>событие</b>{{ entities.get('event_type') }}</span>{% endif %}
+    {% if entities.get('object') %}<span class="entity"><b>объект</b>{{ entities.get('object') }}</span>{% endif %}
+    {% set loc = entities.get('location') %}
+    {% if loc %}<span class="entity"><b>где</b>{{ loc.get('text') if loc is mapping else loc }}{% if loc is mapping and loc.get('district') %} · {{ loc.get('district') }}{% endif %}</span>{% endif %}
+    {% set tm = entities.get('time') %}
+    {% if tm %}<span class="entity"><b>когда</b>{{ tm.get('text') if tm is mapping else tm }}</span>{% endif %}
+    {% for kw in entities.get('keywords') or [] %}<span class="entity">#{{ kw }}</span>{% endfor %}
+    {% if entities.get('status') == 'unconfirmed' %}<span class="badge badge--warn">не подтверждено</span>{% elif entities.get('status') == 'confirmed' %}<span class="badge badge--ok">подтверждено</span>{% endif %}
+  </div>
+  {% endif %}
+
+  <div class="stepper {{ 'stepper--rejected' if st == 'rejected' }}" aria-label="Статус по шагам">
+    {% set idx = STATUS_FLOW.index(inv.status) if inv.status in STATUS_FLOW else -1 %}
+    {% for s in STATUS_FLOW %}
+      {% if not loop.first %}<span class="stepper__line {{ 'is-done' if loop.index0 <= idx }}"></span>{% endif %}
+      <span class="stepper__step {{ 'is-done' if loop.index0 < idx or (st == 'published' and loop.last) }} {{ 'is-current' if loop.index0 == idx and st != 'published' }}">
+        <span class="stepper__dot">{{ '✓' if loop.index0 < idx or (st == 'published' and loop.last) else loop.index }}</span>{{ s|status_label }}
+      </span>
+    {% endfor %}
+    {% if st == 'rejected' %}<span class="stepper__line"></span><span class="stepper__step is-current"><span class="stepper__dot">✕</span>Отклонено</span>{% endif %}
+  </div>
+</section>
+
+<div class="cols">
+  <div style="min-width:0">
+    {% set tab_defs = [
+      ('progress', 'Прогресс и цепочка', iterations|length),
+      ('report', 'Справка', report_items.n),
+      ('sources', 'Источники', sources|length),
+      ('contacts', 'Кому позвонить', contacts|length if can_see_contacts else none),
+      ('media', 'Медиа', media|length),
+      ('draft', 'Черновик', ('v' ~ latest_draft.version) if latest_draft else 0),
+      ('history', 'История', history|length),
+    ] %}
+    <nav class="tabs" role="tablist" data-tabs>
+      {% for key, label, cnt in tab_defs %}
+        <button type="button" role="tab" class="tab {{ 'is-active' if tab == key }}" data-tab="{{ key }}" aria-selected="{{ 'true' if tab == key else 'false' }}">
+          {{ label }}
+          {% if cnt is none %}<span class="count" title="Только продюсеру и AI-оператору">🔒</span>
+          {% elif cnt %}<span class="count {{ 'count--hot' if key == 'contacts' }}">{{ cnt }}</span>{% endif %}
+        </button>
+      {% endfor %}
+    </nav>
+
+    <div class="tab-panel {{ 'is-active' if tab == 'progress' }}" data-panel="progress">{% include "investigation/_tab_progress.html" %}</div>
+    <div class="tab-panel {{ 'is-active' if tab == 'report' }}" data-panel="report">{% include "investigation/_tab_report.html" %}</div>
+    <div class="tab-panel {{ 'is-active' if tab == 'sources' }}" data-panel="sources">{% include "investigation/_tab_sources.html" %}</div>
+    <div class="tab-panel {{ 'is-active' if tab == 'contacts' }}" data-panel="contacts">{% include "investigation/_tab_contacts.html" %}</div>
+    <div class="tab-panel {{ 'is-active' if tab == 'media' }}" data-panel="media">{% include "investigation/_tab_media.html" %}</div>
+    <div class="tab-panel {{ 'is-active' if tab == 'draft' }}" data-panel="draft">{% include "investigation/_tab_draft.html" %}</div>
+    <div class="tab-panel {{ 'is-active' if tab == 'history' }}" data-panel="history">{% include "investigation/_tab_history.html" %}</div>
+  </div>
+
+  <aside class="stack sticky-side">
+    {% set uniq_groups = source_groups|selectattr('primary.is_primary')|list %}
+    <div class="card card--pad-sm">
+      <div class="section-title">Коротко</div>
+      <div class="grid grid-2" style="gap:8px">
+        <div class="stat-chip"><b>{{ iterations|length }}</b><span>{{ plural(iterations|length, 'итерация', 'итерации', 'итераций') }} поиска</span></div>
+        <div class="stat-chip"><b>{{ sources|length }}</b><span>источников</span></div>
+        <div class="stat-chip"><b>{{ source_groups|length }}</b><span>уникальных сюжетов</span></div>
+        <div class="stat-chip"><b>{{ sources|length - source_groups|length }}</b><span>дублей свёрнуто</span></div>
+        {% if can_see_contacts %}<div class="stat-chip"><b>{{ contacts|length }}</b><span>очевидцев</span></div>{% endif %}
+        <div class="stat-chip"><b>{{ media|length }}</b><span>медиа</span></div>
+      </div>
+    </div>
+
+    <div class="card" id="feedback">
+      <div class="card__head"><h3>Норм или стрём?</h3><span class="muted small">оценка темы</span></div>
+      {% if can_feedback %}
+        {% if my_feedback %}
+          <p class="small">Ваша оценка: <span class="fb-verdict fb-verdict--{{ my_feedback.verdict|ev }}">{{ 'норм' if my_feedback.verdict|ev == 'good' else 'стрём' }}</span> <span class="muted">{{ my_feedback.created_at|ago }}</span></p>
+          <p class="muted small">Можно оставить ещё одну оценку — например, после публикации.</p>
+        {% endif %}
+        <form method="post" action="/feedback">
+          <input type="hidden" name="investigation_id" value="{{ inv.id }}">
+          <div class="verdict">
+            <label><input type="radio" name="verdict" value="good" required><span class="verdict__box good"><span class="verdict__emoji">👍</span><b>Норм</b><span>тема годная</span></span></label>
+            <label><input type="radio" name="verdict" value="bad"><span class="verdict__box bad"><span class="verdict__emoji">👎</span><b>Стрём</b><span>не то / фейк</span></span></label>
+          </div>
+          <textarea name="comment" rows="2" placeholder="Комментарий для AI-оператора (необязательно)"></textarea>
+          <button class="btn btn--block" type="submit" style="margin-top:8px">Отправить оценку</button>
+        </form>
+      {% else %}
+        <p class="muted small">Оценку ставит продюсер. AI-оператор видит все оценки в своей ленте.</p>
+      {% endif %}
+      {% if feedback %}
+        <hr>
+        {% for f in feedback[:4] %}
+          <div class="fb-item">
+            <span class="fb-verdict fb-verdict--{{ f.verdict|ev }}">{{ 'норм' if f.verdict|ev == 'good' else 'стрём' }}</span>
+            <div class="small"><b>{{ f.user.name if f.user else '—' }}</b> <span class="muted">{{ f.created_at|ago }}</span>{% if f.comment %}<br>{{ f.comment }}{% endif %}</div>
+          </div>
+        {% endfor %}
+      {% endif %}
+    </div>
+  </aside>
+</div>
+{% endblock %}
+
+{% block data %}
+<script type="application/json" id="nf-sources">{{ sources_json|tojson }}</script>
+<script type="application/json" id="nf-claims">{{ claims|tojson }}</script>
+<script type="application/json" id="nf-states">{{ states|tojson }}</script>
+{% endblock %}

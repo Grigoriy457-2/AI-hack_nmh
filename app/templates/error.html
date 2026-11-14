@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Ошибка {{ status_code }}{% endblock %}
+{% block content %}
+<div class="error-box card">
+  <div class="error-box__code">{{ status_code }}</div>
+  <h2>{% if status_code == 403 %}Нет доступа{% elif status_code == 404 %}Не найдено{% else %}Что-то пошло не так{% endif %}</h2>
+  <p class="muted">{{ message }}</p>
+  <div class="row" style="justify-content:center">
+    <a class="btn btn--primary" href="/">На главную</a>
+    {% if status_code == 403 %}<a class="btn" href="/login?switch=1">Войти другой ролью</a>{% endif %}
+  </div>
+</div>
+{% endblock %}

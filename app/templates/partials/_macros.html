@@ -1,0 +1,98 @@
+{# Общие макросы NEWSFLOW. Импорт: {% from "partials/_macros.html" import status_badge, ... %} #}
+
+{% macro status_badge(status, size='') -%}
+  {%- set v = status|ev -%}
+  <span class="status status--{{ v }} {{ 'status--lg' if size == 'lg' }}">{{ status|status_label }}</span>
+{%- endmacro %}
+
+{% macro source_badge(kind) -%}
+  {%- set v = kind|ev -%}
+  <span class="badge badge--kind-{{ v }}">{{ kind|kind_label }}</span>
+{%- endmacro %}
+
+{% macro uniqueness_bar(score) -%}
+  {%- if score is none -%}
+  <span class="uniq" title="Уникальность не рассчитана">уникальность —</span>
+  {%- else -%}
+  {%- set p = (score * 100)|round|int -%}
+  <span class="uniq" title="Уникальность: насколько сообщение не повторяет более ранние (0–100%)">
+    <span class="uniq__bar"><i class="{{ 'low' if score < 0.5 }}" style="width: {{ p }}%"></i></span>
+    уникальность <b>{{ p }}%</b>
+  </span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro fact_badge(state, by_human=False) -%}
+  {%- set v = state|ev -%}
+  {%- if v in ('confirmed', 'unconfirmed', 'false') -%}
+  <span class="fact fact--{{ v }}" data-fact-badge>{{ v|fact_label }}{% if by_human %} <span class="by">· человек</span>{% endif %}</span>
+  {%- else -%}
+  <span class="fact fact--none" data-fact-badge>не проверен</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro avatar(u, size='') -%}
+  {%- if u -%}
+  <span class="avatar avatar--{{ u.role|ev }} {{ 'avatar--' ~ size if size }}" aria-hidden="true">{{ u.name|initials }}</span>
+  {%- else -%}
+  <span class="avatar {{ 'avatar--' ~ size if size }}" style="background:#94a3b8" aria-hidden="true">AI</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro hint(key) -%}
+  <div class="hint" data-hint="{{ key }}">
+    <div class="hint__icon" aria-hidden="true">?</div>
+    <div class="hint__body"><b>Что здесь делать: </b>{{ caller() }}</div>
+    <button class="hint__close" type="button" title="Скрыть подсказку" aria-label="Скрыть подсказку">×</button>
+  </div>
+{%- endmacro %}
+
+{% macro footnotes(source_ids, source_num) -%}
+  {%- for raw in source_ids or [] -%}
+    {%- set sid = raw|int(-1) -%}
+    {%- if sid in source_num -%}
+    <button type="button" class="fn" data-src="{{ sid }}" title="Источник [{{ source_num[sid] }}]">{{ source_num[sid] }}</button>
+    {%- else -%}
+    <span class="fn fn--missing" title="Источник #{{ sid }} не найден">?</span>
+    {%- endif -%}
+  {%- endfor -%}
+  {%- if not source_ids -%}<span class="no-src" title="У утверждения нет ссылки на источник">нет источника</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro mark_buttons(inv_id, claim_id, text, current) -%}
+  {%- set cur = current|ev -%}
+  <span class="ritem__marks">
+    {%- for st, lbl in [('confirmed', '✓ Подтверждён'), ('unconfirmed', '? Не подтверждён'), ('false', '✕ Ложь')] %}
+    <form method="post" action="/investigations/{{ inv_id }}/facts" data-ajax-fact style="display:inline">
+      <input type="hidden" name="claim_id" value="{{ claim_id }}">
+      <input type="hidden" name="fact_text" value="{{ text }}">
+      <input type="hidden" name="state" value="{{ st }}">
+      <button type="submit" class="mark-btn mark-btn--{{ st }} {{ 'is-on' if cur == st }}" title="Пометить: {{ st|fact_label }}">{{ lbl }}</button>
+    </form>
+    {%- endfor %}
+  </span>
+{%- endmacro %}
+
+{% macro inv_item(inv, extra='', draft=None) -%}
+  {%- set prog = (inv.progress_json or {}) -%}
+  <a class="inv-item" href="/investigations/{{ inv.id }}">
+    <div>
+      <div class="inv-item__title">{{ inv.title }}</div>
+      <div class="inv-item__lead">{{ draft.title if draft else inv.lead_text }}</div>
+      <div class="inv-item__meta">
+        <span>#{{ inv.id }}</span>
+        {% if inv.channel %}<span>канал: {{ inv.channel.name }}</span>{% endif %}
+        {% if inv.producer %}<span>продюсер: {{ inv.producer.name }}</span>{% endif %}
+        {% if inv.editor %}<span>редактор: {{ inv.editor.name }}</span>{% endif %}
+        <span title="{{ inv.updated_at|dt('full') }}">обновлено {{ inv.updated_at|ago }}</span>
+        {{ extra }}
+      </div>
+    </div>
+    <div class="inv-item__side">
+      {{ status_badge(inv.status) }}
+      {% if inv.status|ev == 'researching' and prog.get('percent') is not none %}
+        <span class="progress-mini" title="{{ prog.get('percent') }}%"><i style="width: {{ prog.get('percent') or 0 }}%"></i></span>
+      {% endif %}
+    </div>
+  </a>
+{%- endmacro %}

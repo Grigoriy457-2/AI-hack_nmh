@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import status_badge, hint, avatar %}
+{% block title %}Пульт AI-оператора{% endblock %}
+{% block content %}
+{% call hint('operator') %}
+  это пульт <b>AI-оператора</b>: доска всех расследований по статусам (красным — зависшие дольше {{ stale_after }} мин), метрики эффективности NEWSFLOW, оценки продюсеров «норм / стрём», подключённые домовые чаты MAX и профили стиля каналов (Channel DNA). Оператор может выполнить любой переход статуса — откройте карточку.
+{% endcall %}
+
+<div class="page-head">
+  <div><h1>Пульт AI-оператора</h1><div class="sub">Всё, что происходит в редакции, — на одном экране.</div></div>
+  <a class="btn btn--primary" href="/investigations/new">+ Новая зацепка</a>
+</div>
+
+<nav class="anchor-nav">
+  <a href="#board">Доска задач</a><a href="#metrics">Метрики</a><a href="#feedback">Норм / стрём</a><a href="#chats">Чаты MAX</a><a href="#channels">Channel DNA</a>
+</nav>
+
+{# ---------------- зависшие #}
+{% if board.stale %}
+<div class="stale-alert" role="alert">
+  <h3>⚠ Зависшие задачи: {{ board.stale|length }}</h3>
+  <ul>
+    {% for c in board.stale %}
+      <li>{{ status_badge(c.status) }} <a href="/investigations/{{ c.id }}"><b>{{ c.title }}</b></a>
+        <span class="muted small">без движения {{ c.age_minutes|minutes }}{% if c.responsible %} · ответственный: {{ c.responsible.name }}{% else %} · ответственный: SMM{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{# ---------------- канбан #}
+<section class="op-section" id="board">
+  <div class="card__head"><h2>Доска задач</h2><span class="muted small">{{ metrics.get('investigations_total', 0) }} расследований</span></div>
+  <div class="kanban">
+    {% for s in STATUS_ORDER %}
+      {% set cards = board.columns.get(s, []) %}
+      <div class="kcol">
+        <div class="kcol__head">{{ status_badge(s) }}<span class="kcol__count">{{ cards|length }}</span></div>
+        {% for c in cards %}
+          <a class="kcard {{ 'kcard--stale' if c.is_stale }}" href="/investigations/{{ c.id }}">
+            <div class="kcard__title">{{ c.title }}</div>
+            <div class="kcard__meta">
+              <span class="row" style="gap:5px">{% if c.responsible %}<span class="avatar avatar--sm avatar--{{ c.responsible.role|ev }}" title="{{ c.responsible.name }}">{{ c.responsible.name|initials }}</span>{{ c.responsible.name.split(' ')[0] }}{% else %}<span class="faint">{{ 'SMM' if s|ev in ('ready', 'published') else '—' }}</span>{% endif %}</span>
+              <span class="kcard__age" title="В этом статусе">{{ c.age_minutes|minutes }}</span>
+            </div>
+          </a>
+        {% else %}
+          <div class="faint small" style="text-align:center;padding:12px 0">пусто</div>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+{# ---------------- метрики #}
+<section class="op-section" id="metrics">
+  <div class="card__head"><h2>Метрики эффективности</h2>
+    {% if not metrics_live %}<span class="badge badge--warn">расчёт метрик ещё не подключён — показаны только счётчики</span>{% endif %}
+  </div>
+  <div class="metrics">
+    {% for m in ui_metrics %}
+      {% set v = metrics.get(m.key) %}
+      <div class="metric" title="{{ metric_labels.get(m.key, '') }}">
+        <div class="metric__title">{{ m.title }}</div>
+        {% if v is none %}
+          <div class="metric__value is-none">нет данных</div>
+        {% elif m.fmt == 'pct' %}
+          <div class="metric__value">{{ v|pct }}</div>
+          <div class="metric__gauge"><i style="width: {{ [[v * 100, 0]|max, 100]|min }}%"></i></div>
+        {% else %}
+          <div class="metric__value">{{ v|dur }}</div>
+        {% endif %}
+        <div class="metric__hint">{{ m.hint }}</div>
+      </div>
+    {% endfor %}
+    <div class="metric">
+      <div class="metric__title">Всего расследований</div>
+      <div class="metric__value">{{ metrics.get('investigations_total', 0) }}</div>
+      {% set bs = metrics.get('by_status') or {} %}
+      {% set total = metrics.get('investigations_total') or 0 %}
+      {% if total %}
+      <div class="status-bars">
+        {% for s in STATUS_ORDER %}{% set n = bs.get(s|ev, 0) %}{% if n %}<i style="width: {{ n * 100 / total }}%; background: var(--st-{{ s|ev }})" title="{{ s|status_label }}: {{ n }}"></i>{% endif %}{% endfor %}
+      </div>
+      <div class="status-legend">{% for s in STATUS_ORDER %}{% set n = bs.get(s|ev, 0) %}{% if n %}<span style="--c: var(--st-{{ s|ev }})">{{ s|status_label }} {{ n }}</span>{% endif %}{% endfor %}</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<div class="grid grid-2" style="align-items:start">
+  {# ---------------- фидбэк #}
+  <section class="op-section card" id="feedback">
+    <div class="card__head"><h2>Норм / стрём от продюсеров</h2>
+      <span class="row"><span class="fb-verdict fb-verdict--good">норм {{ good_count }}</span><span class="fb-verdict fb-verdict--bad">стрём {{ bad_count }}</span></span>
+    </div>
+    <p class="muted small">Как продюсеры оценивают темы, которые NEWSFLOW нашёл и проверил. «Стрём» с комментарием — сигнал настроить источники или промпты.</p>
+    {% if feedback %}
+      <div style="max-height:420px;overflow-y:auto">
+      {% for f in feedback %}
+        <div class="fb-item">
+          <span class="fb-verdict fb-verdict--{{ f.verdict|ev }}">{{ 'норм' if f.verdict|ev == 'good' else 'стрём' }}</span>
+          <div class="small" style="flex:1">
+            <a href="/investigations/{{ f.investigation_id }}"><b>{{ inv_titles.get(f.investigation_id, '#' ~ f.investigation_id) }}</b></a>
+            {% if f.comment %}<div>«{{ f.comment }}»</div>{% endif %}
+            <div class="muted">{{ f.user.name if f.user else '—' }} · {{ f.created_at|dt }}</div>
+          </div>
+        </div>
+      {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">Пока нет оценок. Продюсеры ставят их на странице расследования.</div>
+    {% endif %}
+  </section>
+
+  {# ---------------- чаты MAX #}
+  <section class="op-section card" id="chats">
+    <div class="card__head">
+      <h2>Домовые чаты MAX</h2>
+      <form method="post" action="/operator/sync" style="margin:0" data-busy="Синхронизируем…">
+        <button type="submit" class="btn btn--primary btn--sm">⟳ Синхронизировать сейчас</button>
+      </form>
+    </div>
+    <div class="row small muted" style="margin-bottom:10px">
+      <span>Последняя синхронизация: <b style="color:var(--nf-text)">{{ last_sync|dt if last_sync else 'ещё не было' }}</b>{% if last_sync %} ({{ last_sync|ago }}){% endif %}</span>
+      {% if sync_result %}<span class="badge badge--ok">+{{ sync_result.new_messages }} новых сообщений</span>{% endif %}
+    </div>
+    {% if chats %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Чат</th><th>Сообщений</th><th>Синк</th><th>Вкл.</th></tr></thead>
+        <tbody>
+          {% for c in chats %}
+          <tr>
+            <td><b>{{ c.title }}</b><div class="muted small">{{ c.district or '' }}{% if c.district %} · {% endif %}<span class="mono">{{ c.external_id }}</span></div></td>
+            <td class="mono">{{ c.messages_count }}</td>
+            <td class="small muted nowrap">{{ c.last_synced_at|dt if c.last_synced_at else '—' }}</td>
+            <td>
+              <form method="post" action="/operator/chats/{{ c.id }}/toggle" style="margin:0">
+                <button type="submit" class="switch {{ 'is-on' if c.enabled }}" role="switch" aria-checked="{{ 'true' if c.enabled else 'false' }}" title="{{ 'Отключить' if c.enabled else 'Подключить' }} чат"><span class="sr-only">{{ 'вкл' if c.enabled else 'выкл' }}</span></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="empty"><b>Чаты ещё не подключены</b>Нажмите «Синхронизировать сейчас» — NEWSFLOW получит список чатов, куда добавлен бот.</div>
+    {% endif %}
+    <p class="muted small" style="margin-top:10px">Бот добавляется в чат администратором с согласия участников. Отключённые чаты не участвуют в поиске и не синхронизируются.</p>
+  </section>
+</div>
+
+{# ---------------- Channel DNA #}
+<section class="op-section" id="channels">
+  <div class="card__head"><h2>Профили каналов — Channel DNA</h2><span class="muted small">черновики пишутся в стиле выбранного канала</span></div>
+  {% if channels %}
+  <div class="grid grid-3">
+    {% for ch in channels %}
+    {% set dna = ch.dna_json or {} %}
+    <div class="card dna-card">
+      <div>
+        <div class="row row--between"><b style="font-size:16px">{{ ch.name }}</b><span class="muted small">{{ ch.handle or '' }}</span></div>
+        <div class="muted small">{{ ch.description or '' }}</div>
+      </div>
+      {% if dna %}
+        <div class="dna-stats">
+          <div class="dna-stat"><b>{{ dna.get('avg_length', 0)|round|int }}</b><span>симв. в посте</span></div>
+          <div class="dna-stat"><b>{{ '%.1f'|format(dna.get('emoji_per_post') or 0) }}</b><span>эмодзи/пост</span></div>
+          <div class="dna-stat"><b>{{ '%.1f'|format(dna.get('avg_paragraphs') or 0) }}</b><span>абзацев</span></div>
+        </div>
+        <div class="row" style="gap:6px">
+          {% if dna.get('tone') %}<span class="badge badge--accent">тон: {{ dna.get('tone') }}</span>{% endif %}
+          {% if dna.get('headline', {}).get('style') %}<span class="badge">заголовок: {{ dna.get('headline', {}).get('style') }}</span>{% endif %}
+          {% for e in dna.get('top_emojis') or [] %}<span class="badge">{{ e }}</span>{% endfor %}
+          {% for h in dna.get('top_hashtags') or [] %}<span class="badge badge--info">{{ h }}</span>{% endfor %}
+        </div>
+        {% if dna.get('structure') %}
+        <div class="structure">{% for part in dna.get('structure') %}{% if not loop.first %}<i>→</i>{% endif %}<span>{{ part }}</span>{% endfor %}</div>
+        {% endif %}
+        {% if dna.get('rules') %}<ul class="dna-rules">{% for r in dna.get('rules') %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+        <div class="muted small">Проанализировано постов: {{ dna.get('posts_analyzed', '—') }}{% if ch.dna_updated_at %} · обновлено {{ ch.dna_updated_at|dt }}{% endif %}</div>
+      {% else %}
+        <div class="empty" style="padding:16px">DNA ещё не рассчитан. Он посчитается при первом расследовании для канала — или нажмите кнопку ниже.</div>
+        <div class="muted small">Постов в истории: {{ (ch.sample_posts or [])|length }}</div>
+      {% endif %}
+      <button type="button" class="btn btn--sm" data-rebuild-dna="{{ ch.id }}">Пересчитать DNA</button>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+    <div class="empty">Каналов нет.</div>
+  {% endif %}
+</section>
+{% endblock %}

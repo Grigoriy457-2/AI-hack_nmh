@@ -1,0 +1,59 @@
+{% from "partials/_macros.html" import fact_badge, footnotes, mark_buttons %}
+{% if not report %}
+  <div class="empty">
+    <b>Справки пока нет</b>
+    {% if st == 'researching' %}NEWSFLOW ещё работает — справка появится автоматически, как только завершится последний этап.
+    {% elif st == 'new' %}Запустите исследование, чтобы получить справку.
+    {% else %}Данные справки недоступны.{% endif %}
+  </div>
+{% else %}
+  <div class="row row--between" style="margin-bottom:12px">
+    <div>
+      <h2 style="margin:0">{{ report.get('title') or inv.title }}</h2>
+      <div class="muted small">Справка сформирована {{ report.get('generated_at')|dt }} · каждый пункт ссылается на источники — нажмите на номер-сноску</div>
+    </div>
+    <div class="legend">
+      <span class="fact fact--confirmed">подтверждён</span>
+      <span class="fact fact--unconfirmed">не подтверждён</span>
+      <span class="fact fact--false">ложь</span>
+      <span class="fact fact--none">не проверен</span>
+    </div>
+  </div>
+  {% if can_mark %}
+  <div class="legal" style="background:#f5f3ff;border-color:#ddd6fe;color:#5b21b6">Вы можете помечать пункты справки кнопками «Подтверждён / Не подтверждён / Ложь» — отметка человека важнее оценки AI и учитывается в метриках.</div>
+  {% endif %}
+  <div class="report-sections">
+    {% for sec in report.get('sections') or [] %}
+    {% set items = sec.get('items') or [] %}
+    <section class="rsec rsec--{{ sec.get('key') }}" id="sec-{{ sec.get('key') }}">
+      <div class="rsec__head">
+        <span class="rsec__n">{{ loop.index }}</span>
+        <h3>{{ sec.get('title') }}</h3>
+        {% if items %}<span class="muted small">{{ items|length }}</span>{% endif %}
+      </div>
+      <div class="rsec__body">
+        {% if sec.get('text') %}<p style="margin-bottom:{{ '8px' if items else '0' }}">{{ sec.get('text') }}</p>{% endif %}
+        {% for it in items %}
+          {% set cid = it.get('id') or (sec.get('key') ~ '-' ~ loop.index) %}
+          {% set eff = states.get(cid|string, {'state': it.get('state'), 'by_human': False}) %}
+          <div class="ritem" id="item-{{ cid }}" data-claim-id="{{ cid }}">
+            {% if it.get('time') %}<span class="ritem__time">{{ it.get('time') }}</span>{% endif %}
+            <div class="ritem__body">
+              <div class="ritem__text">{{ it.get('text') }}{{ footnotes(it.get('source_ids'), source_num) }}</div>
+              <div class="ritem__foot">
+                {{ fact_badge(eff.get('state'), eff.get('by_human')) }}
+                {% if can_mark %}{{ mark_buttons(inv.id, cid, it.get('text'), eff.get('state') if eff.get('by_human') else none) }}{% endif %}
+              </div>
+            </div>
+          </div>
+        {% else %}
+          {% if not sec.get('text') %}<div class="muted small">Нет данных по этому разделу.</div>{% endif %}
+        {% endfor %}
+        {% if sec.get('key') == 'to_verify' and can_see_contacts and contacts %}
+          <div style="margin-top:10px"><button type="button" class="btn btn--sm" data-goto-tab="contacts">Открыть «Кому позвонить» ({{ contacts|length }}) →</button></div>
+        {% endif %}
+      </div>
+    </section>
+    {% endfor %}
+  </div>
+{% endif %}

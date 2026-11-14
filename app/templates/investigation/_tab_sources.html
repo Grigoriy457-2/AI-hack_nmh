@@ -1,0 +1,55 @@
+{% from "partials/_macros.html" import source_badge, uniqueness_bar %}
+{% macro src_card(s, primary_card) %}
+  {% set msg = s.chat_message %}
+  <div class="src {{ 'src--primary' if s.is_primary }}" id="src-{{ s.id }}" data-src-card="{{ s.id }}">
+    <div class="src__n">{{ source_num.get(s.id) }}</div>
+    <div style="min-width:0">
+      <div class="src__badges">
+        {{ source_badge(s.kind) }}
+        {% if s.is_primary %}<span class="badge badge--primary-src" title="Самое раннее сообщение в кластере одинаковых текстов">первоисточник</span>{% endif %}
+        {% if primary_card and dup_count.get(s.id, 0) > 0 %}<span class="badge badge--dup" title="Столько перепечаток/пересылок этого текста найдено">дубль ×{{ dup_count.get(s.id) }}</span>{% endif %}
+        {% if not primary_card %}<span class="badge badge--dup">дубль</span>{% endif %}
+        {% if s.is_important %}<span class="badge badge--important" title="Содержит новые факты: время, место, «я видел», фото">важное</span>{% endif %}
+        {{ uniqueness_bar(s.uniqueness_score) }}
+      </div>
+      <div class="src__title">{{ s.title or (('Сообщение: ' ~ msg.author_name) if msg else 'Источник') }}</div>
+      {% set text = s.snippet or (msg.text if msg else '') %}
+      {% if text %}<div class="src__snippet">{{ text }}</div>{% endif %}
+      <div class="src__meta">
+        {% set when = s.published_at or (msg.sent_at if msg else none) %}
+        {% if when %}<span>{{ when|dt }}</span>{% endif %}
+        {% if msg %}<span>{{ chat_titles.get(msg.chat_id, 'чат MAX') }}{% if msg.author_name %} · {{ msg.author_name }}{% endif %}</span>{% if msg.is_forwarded %}<span class="badge">переслано</span>{% endif %}{% endif %}
+        {% if s.url|safe_url %}<a href="{{ s.url|safe_url }}" target="_blank" rel="noopener noreferrer">{{ s.url|host }} ↗</a>{% elif s.url %}<span class="mono" title="Ссылка на сообщение в MAX">{{ s.url }}</span>{% endif %}
+        {% if s.iteration_n %}<span>итерация {{ s.iteration_n }}{% if s.query %} · «{{ s.query }}»{% endif %}</span>{% endif %}
+      </div>
+    </div>
+  </div>
+{% endmacro %}
+
+{% if not sources %}
+  <div class="empty"><b>Источников пока нет</b>{{ 'Они появятся по ходу цепочки поиска.' if st == 'researching' else 'Нет данных.' }}</div>
+{% else %}
+  <div class="dedup-summary">
+    <div class="stat-chip"><b>{{ sources|length }}</b><span>найдено сообщений и публикаций</span></div>
+    <div class="stat-chip"><b>{{ source_groups|length }}</b><span>независимых (после склейки дублей)</span></div>
+    <div class="stat-chip"><b>{{ sources|length - source_groups|length }}</b><span>дублей и пересылок свёрнуто</span></div>
+  </div>
+  <p class="muted small">Перепечатки и пересылки одного текста не считаются независимыми подтверждениями: они склеены в кластер, первым показан <b>первоисточник</b> — самое раннее сообщение. Шкала уникальности показывает, сколько нового сообщение добавляет к уже известному.</p>
+  <div class="filters" data-src-filter>
+    <button type="button" class="chip is-active" data-kind="">Все <span class="n">{{ sources|length }}</span></button>
+    {% for k in ['web', 'max_chat', 'official', 'media'] %}
+      {% if kind_counts.get(k) %}<button type="button" class="chip" data-kind="{{ k }}">{{ k|kind_label }} <span class="n">{{ kind_counts.get(k) }}</span></button>{% endif %}
+    {% endfor %}
+  </div>
+  {% for g in source_groups %}
+    <div class="src-group" data-kinds="{{ g.kinds|join(' ') }}" id="cluster-{{ g.cluster_id }}">
+      {{ src_card(g.primary, true) }}
+      {% if g.duplicates %}
+      <details class="dups">
+        <summary>Показать дубли ({{ g.duplicates|length }}) — тот же текст в других местах</summary>
+        {% for d in g.duplicates %}{{ src_card(d, false) }}{% endfor %}
+      </details>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}

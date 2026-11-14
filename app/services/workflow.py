@@ -9,7 +9,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import InvestigationStatus as S
-from app.models import Investigation, Role, StatusHistory, User
+from app.models import Investigation, Role, StatusHistory, User, utcnow
 
 SYSTEM = None  # «роль» пайплайна
 
@@ -57,12 +57,23 @@ class TransitionForbidden(TransitionError):
 def can_transition(role: Role | None, from_status: S, to_status: S) -> bool:
     """True, если ``role`` (None = система) может перевести from -> to.
     Operator: True для любого перехода, присутствующего в таблице."""
-    raise NotImplementedError("DEV-BACKEND: can_transition")
+    from_status, to_status = S(from_status), S(to_status)
+    allowed = ALLOWED_TRANSITIONS.get(from_status, {}).get(to_status)
+    if allowed is None:
+        return False
+    if role is not None and Role(role) == Role.operator:
+        return True
+    return role in allowed
 
 
 def available_transitions(role: Role | None, from_status: S) -> list[S]:
     """Список статусов, куда роль может перевести (для кнопок UI)."""
-    raise NotImplementedError("DEV-BACKEND: available_transitions")
+    from_status = S(from_status)
+    return [to for to in ALLOWED_TRANSITIONS.get(from_status, {}) if can_transition(role, from_status, to)]
+
+
+def transition_exists(from_status: S, to_status: S) -> bool:
+    return S(to_status) in ALLOWED_TRANSITIONS.get(S(from_status), {})
 
 
 async def transition(
@@ -76,4 +87,33 @@ async def transition(
     статус, обновить updated_at, при to=report_ready — report_ready_at, при to=editing и
     user-редакторе — editor_id; добавить StatusHistory(user_id=None для системы).
     Делает flush, НЕ commit (commit — вызывающий)."""
-    raise NotImplementedError("DEV-BACKEND: transition")
+    to = S(to)
+    from_status = S(inv.status)
+    if not transition_exists(from_status, to):
+        raise TransitionNotAllowed(f"Переход {from_status.value} -> {to.value} недопустим")
+    role = user.role if user is not None else SYSTEM
+    if not can_transition(role, from_status, to):
+        who = Role(role).label if role is not None else "система"
+        raise TransitionForbidden(f"Роль «{who}» не может выполнить переход {from_status.value} -> {to.value}")
+
+    now = utcnow()
+    inv.status = to
+    inv.updated_at = now
+    # Time to Draft считаем по завершению исследования (researching -> report_ready);
+    # возврат от редактора (editing -> report_ready) метку не сбрасывает.
+    if to == S.report_ready and (from_status == S.researching or inv.report_ready_at is None):
+        inv.report_ready_at = now
+    if to == S.editing and user is not None and user.role == Role.editor:
+        inv.editor_id = user.id
+
+    entry = StatusHistory(
+        investigation_id=inv.id,
+        from_status=from_status,
+        to_status=to,
+        user_id=user.id if user is not None else None,
+        comment=comment,
+        created_at=now,
+    )
+    session.add(entry)
+    await session.flush()
+    return entry

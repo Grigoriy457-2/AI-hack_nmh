@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import status_badge, hint %}
+{% block title %}Норм / стрём{% endblock %}
+{% block content %}
+{% call hint('feedback') %}
+  оцените тему, которую нашёл и проверил NEWSFLOW: <b>«норм»</b> — годная, <b>«стрём»</b> — фейк, не наш формат или не подтвердилось. Комментарий увидит AI-оператор и подкрутит источники.
+{% endcall %}
+<div class="page-head"><div><h1>Норм или стрём?</h1><div class="sub">Обратная связь продюсера по темам NEWSFLOW</div></div></div>
+
+<div class="cols">
+  <div class="card" id="feedback">
+    {% if investigations %}
+    <form method="post" action="/feedback">
+      <div class="field">
+        <label for="inv">Тема</label>
+        <select name="investigation_id" id="inv">
+          {% for i in investigations %}
+            <option value="{{ i.id }}" {{ 'selected' if i.id == selected_id }}>#{{ i.id }} · {{ i.title }} — {{ i.status|status_label }}{{ ' ✓ оценено' if i.id in rated }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="verdict">
+        <label><input type="radio" name="verdict" value="good" required><span class="verdict__box good"><span class="verdict__emoji">👍</span><b>Норм</b><span>тема годная, работаем</span></span></label>
+        <label><input type="radio" name="verdict" value="bad"><span class="verdict__box bad"><span class="verdict__emoji">👎</span><b>Стрём</b><span>фейк / не наш формат</span></span></label>
+      </div>
+      <div class="field">
+        <label for="comment">Комментарий</label>
+        <textarea id="comment" name="comment" rows="3" placeholder="Например: «очевидец подтвердил по телефону, всё чётко» или «слух из прошлогоднего чата»"></textarea>
+      </div>
+      <button type="submit" class="btn btn--primary">Отправить оценку</button>
+    </form>
+    {% else %}
+      <div class="empty"><b>Нет тем для оценки</b>Создайте зацепку — после исследования её можно будет оценить.</div>
+    {% endif %}
+  </div>
+
+  <aside class="card">
+    <h3>Мои оценки</h3>
+    {% for f in my_feedback %}
+      <div class="fb-item">
+        <span class="fb-verdict fb-verdict--{{ f.verdict|ev }}">{{ 'норм' if f.verdict|ev == 'good' else 'стрём' }}</span>
+        <div class="small"><a href="/investigations/{{ f.investigation_id }}">{{ inv_titles.get(f.investigation_id, '#' ~ f.investigation_id) }}</a>{% if f.comment %}<div>{{ f.comment }}</div>{% endif %}<div class="muted">{{ f.created_at|dt }}</div></div>
+      </div>
+    {% else %}
+      <div class="muted small">Вы ещё не оценивали темы.</div>
+    {% endfor %}
+  </aside>
+</div>
+{% endblock %}

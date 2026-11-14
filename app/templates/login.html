@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import avatar, hint %}
+{% block title %}Вход{% endblock %}
+{% block content %}
+<div class="login-wrap">
+  <div class="login-hero">
+    <h1>От слуха в домовом чате — до проверенного поста</h1>
+    <p>NEWSFLOW AI сам ищет по вебу, официальным источникам и чатам MAX, отсеивает дубли, находит очевидцев и готовит справку с источниками и черновик в стиле канала. Решения принимают люди.</p>
+    <div class="login-steps">
+      <span><b>1</b> Продюсер создаёт зацепку</span>
+      <span><b>2</b> AI ищет цепочкой гипотез</span>
+      <span><b>3</b> Справка + «Кому позвонить»</span>
+      <span><b>4</b> Редактор правит черновик</span>
+      <span><b>5</b> SMM публикует</span>
+    </div>
+  </div>
+
+  {% call hint('login') %}
+    выберите пользователя — это демо-вход без пароля (пароль «demo» уже подставлен). Начните с <b>Продюсера</b>: он создаёт зацепку и запускает NEWSFLOW. Потом переключайтесь между ролями через меню в правом верхнем углу.
+  {% endcall %}
+
+  {% if error %}<div class="flash flash--err">{{ error }}</div>{% endif %}
+
+  {% if not users %}
+    <div class="empty"><b>Пользователей пока нет</b>Запустите <span class="mono">python -m app.seed</span> или перезапустите приложение с SEED_ON_STARTUP=true.</div>
+  {% else %}
+  <form method="post" action="/login" id="login-form">
+    <div class="role-grid">
+    {% for role, items in groups.items() %}
+    <section class="role-group">
+      <div class="role-group__title">
+        <h2>{{ role|role_label }}</h2>
+      </div>
+      <p class="muted small role-group__desc">{{ ROLE_DESCRIPTIONS.get(role, '') }}</p>
+      <div class="user-cards">
+        {% for u in items %}
+        <button type="submit" name="user_id" value="{{ u.id }}" class="user-card">
+          {{ avatar(u, 'lg') }}
+          <span>
+            <span class="user-card__name">{{ u.name }}</span><br>
+            <span class="user-card__title">{{ u.title or (u.role|role_label) }}</span>
+          </span>
+          <span class="user-card__go" aria-hidden="true">→</span>
+        </button>
+        {% endfor %}
+      </div>
+    </section>
+    {% endfor %}
+    </div>
+    <div class="login-pass">
+      <label for="pw" style="font-weight:400">Пароль для всех демо-пользователей:</label>
+      <input id="pw" type="password" name="password" value="demo" autocomplete="off">
+    </div>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

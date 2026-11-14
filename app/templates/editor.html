@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import status_badge, hint, fact_badge, footnotes %}
+{% block title %}Редактура: {{ inv.title }}{% endblock %}
+{% block content %}
+{% set st = inv.status|ev %}
+{% call hint('editor') %}
+  вы <b>редактор, а не копирайтер</b>: слева — черновик, который написал NEWSFLOW (только чтение), справа — ваша правка. Внизу живой diff: зелёным — добавленное, красным — удалённое. Жёлтым подсвечены <b>неподтверждённые утверждения</b> — кликните по ним, чтобы увидеть источник. Сохраните правку и нажмите «Готово для SMM».
+{% endcall %}
+
+<div class="editor-head">
+  <div>
+    <div class="row"><span class="editor-badge">✎ Режим редактора</span>{{ status_badge(inv.status) }}<a class="small" href="/investigations/{{ inv.id }}?tab=report">← справка и источники</a></div>
+    <h1 style="margin:8px 0 2px">Редактура AI-черновика</h1>
+    <div class="muted">{{ inv.title }}{% if inv.channel %} · канал <b>{{ inv.channel.name }}</b>{% endif %}{% if current_draft %} · текущая версия v{{ current_draft.version }}{% endif %}</div>
+  </div>
+  {% if ai_draft %}
+  <div class="change-meter" title="Доля текста, изменённая относительно AI-версии (по словам)">
+    <div class="change-meter__num" id="change-pct">{{ (100 - diff.ratio * 100)|round|int if diff else 0 }}%</div>
+    <div>
+      <div class="change-meter__label">изменено<br>текста редактором</div>
+      <div class="change-meter__bar" style="margin-top:6px"><i id="change-bar"></i></div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% if not ai_draft %}
+  <div class="empty"><b>Черновика пока нет</b>AI-черновик появится, когда NEWSFLOW закончит исследование. <a href="/investigations/{{ inv.id }}">Открыть расследование</a></div>
+{% else %}
+  {% if not can_edit %}
+  <div class="flash flash--warn">Материал в статусе «{{ inv.status|status_label }}». Править текст можно только в статусе «На редактуре» — сейчас режим просмотра.</div>
+  {% endif %}
+
+  <div class="editor-grid" id="editor" data-inv="{{ inv.id }}">
+    <section class="pane pane--ai">
+      <div class="pane__head">
+        <h3>🤖 AI-версия <span class="ro-tag">v{{ ai_draft.version }} · только чтение</span></h3>
+        <span class="muted small">{{ ai_draft.created_at|dt }}</span>
+      </div>
+      <div class="pane__body">
+        <div class="edit-title">{{ ai_draft.title }}</div>
+        <div class="draft-body" id="ai-text" data-highlight-claims>{{ ai_draft.body }}</div>
+      </div>
+    </section>
+
+    <section class="pane pane--edit" id="edit-pane">
+      <form method="post" action="/investigations/{{ inv.id }}/edit" id="edit-form" style="display:contents">
+        <div class="pane__head">
+          <h3>✎ Ваша правка <span class="dirty-flag">● не сохранено</span></h3>
+          <span class="muted small">{% if current_draft and current_draft.id != ai_draft.id %}последнее сохранение v{{ current_draft.version }}, {{ current_draft.created_at|dt }}{% else %}правок ещё не было{% endif %}</span>
+        </div>
+        <div class="pane__body">
+          <input type="text" name="title" class="edit-title" id="edit-title" value="{{ current_draft.title }}" {{ 'readonly' if not can_edit }} aria-label="Заголовок">
+          <textarea name="body" id="edit-body" class="edit-body" {{ 'readonly' if not can_edit }} aria-label="Текст поста">{{ current_draft.body }}</textarea>
+        </div>
+        <div class="editor-actions">
+          {% if can_edit %}
+            <button type="submit" class="btn btn--primary" id="save-btn">Сохранить правку</button>
+            <button type="button" class="btn btn--ghost btn--sm" id="reset-ai" title="Вернуть текст AI-версии в поле правки">Откатить к AI-версии</button>
+          {% endif %}
+          <span class="spacer"></span>
+          <span class="diff-stats" id="diff-stats"></span>
+        </div>
+      </form>
+    </section>
+
+    <aside class="pane pane--claims">
+      <div class="pane__head"><h3>Утверждения <span class="muted small">{{ claims|length }}</span></h3></div>
+      <div class="pane__body">
+        <div class="legend" style="margin-bottom:10px">
+          <span class="claim claim--confirmed">подтв.</span><span class="claim claim--unconfirmed">не подтв.</span><span class="claim claim--false">ложь</span>
+        </div>
+        {% if claims %}
+        <div class="claims-list">
+          {% for c in claims %}
+          {% set sv = c.state if c.state in ('confirmed', 'unconfirmed', 'false') else 'none' %}
+          <div class="claim-card claim-card--{{ sv }}" data-claim-card="{{ c.id }}" tabindex="0">
+            <div class="claim-card__text">{{ c.text }}{{ footnotes(c.source_ids, source_num) }}</div>
+            <div class="claim-card__foot">
+              {{ fact_badge(c.state, c.by_human) }}
+              <span class="changed hidden" data-claim-changed>изменено редактором</span>
+            </div>
+            {% if can_edit or has_role(user, Role.editor) %}
+            <div class="claim-card__foot" style="margin-top:6px">
+              {% for stt, lbl in [('confirmed', '✓ подтв.'), ('unconfirmed', '? не подтв.'), ('false', '✕ ложь')] %}
+              <form method="post" action="/investigations/{{ inv.id }}/facts" data-ajax-fact style="display:inline">
+                <input type="hidden" name="claim_id" value="{{ c.id }}"><input type="hidden" name="fact_text" value="{{ c.text }}"><input type="hidden" name="state" value="{{ stt }}">
+                <button type="submit" class="mark-btn mark-btn--{{ stt }} {{ 'is-on' if c.by_human and c.state == stt }}" title="Пометить: {{ stt|fact_label }}">{{ lbl }}</button>
+              </form>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+          <div class="muted small">AI не выделил утверждений в этом черновике.</div>
+        {% endif %}
+      </div>
+    </aside>
+  </div>
+
+  <section class="pane bottom-pane">
+    <div class="pane__head">
+      <div class="subtabs" data-subtabs>
+        <button type="button" class="subtab is-active" data-subtab="diff">Живой diff с AI-версией</button>
+        <button type="button" class="subtab" data-subtab="check">Проверка утверждений в правке</button>
+      </div>
+      <span class="muted small" id="diff-hint">обновляется при вводе</span>
+    </div>
+    <div class="pane__body">
+      <div data-subpanel="diff"><div class="diff-view" id="diff-view">
+        {%- if diff -%}{%- for op in diff.ops -%}
+          {%- if op.op == 'equal' -%}{{ op.a }}{%- elif op.op == 'delete' -%}<del>{{ op.a }}</del>{%- elif op.op == 'insert' -%}<ins>{{ op.b }}</ins>{%- else -%}<del>{{ op.a }}</del><ins>{{ op.b }}</ins>{%- endif -%}
+        {%- endfor -%}{%- endif -%}
+      </div></div>
+      <div data-subpanel="check" class="hidden"><div class="draft-body" id="check-view" data-highlight-claims></div></div>
+    </div>
+  </section>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row row--between">
+      <div>
+        <b>Решение по материалу</b>
+        <div class="muted small">«Готово для SMM» передаёт последнюю сохранённую версию. Несохранённые правки сначала сохраните.</div>
+      </div>
+      <div class="actions">
+        {% for to in allowed_transitions %}
+          {% set btn = TRANSITION_BUTTONS.get((inv.status, to), (to|status_label, 'ghost')) %}
+          <form method="post" action="/investigations/{{ inv.id }}/transition" data-guard-dirty {% if to|ev == 'report_ready' %}data-ask-comment="Что должен доработать продюсер?"{% endif %}>
+            <input type="hidden" name="to_status" value="{{ to|ev }}"><input type="hidden" name="comment" value="">
+            <button type="submit" class="btn btn--{{ btn[1] }}">{{ btn[0] }}</button>
+          </form>
+        {% else %}
+          <span class="muted small">Нет доступных действий для вашей роли в этом статусе.</span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <details class="card card--pad-sm" style="margin-top:14px">
+    <summary style="cursor:pointer;font-weight:600">История версий ({{ drafts|length }})</summary>
+    <div class="versions" style="margin-top:10px">
+      {% for d in drafts %}<span class="badge {{ 'badge--accent' if d.author_kind|ev == 'ai' else 'badge--ok' }}">v{{ d.version }} · {{ 'AI' if d.author_kind|ev == 'ai' else 'редактор' }} · {{ d.created_at|dt }}</span>{% endfor %}
+    </div>
+  </details>
+{% endif %}
+{% endblock %}
+
+{% block data %}
+<script type="application/json" id="nf-sources">{{ sources_json|tojson }}</script>
+<script type="application/json" id="nf-claims">{{ claims|tojson }}</script>
+<script type="application/json" id="nf-ai-body">{{ (ai_draft.body if ai_draft else '')|tojson }}</script>
+<script type="application/json" id="nf-ai-title">{{ (ai_draft.title if ai_draft else '')|tojson }}</script>
+{% endblock %}
