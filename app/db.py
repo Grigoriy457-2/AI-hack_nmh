@@ -71,9 +71,68 @@ async def init_db(drop: bool = False) -> None:
     import app.models  # noqa: F401  регистрирует модели в Base.metadata
 
     async with engine.begin() as conn:
+        if not drop and await conn.run_sync(_is_outdated_schema):
+            import logging
+
+            logging.getLogger("newsflow").warning(
+                "БД со схемой v1 (роли/старые статусы) — пересоздаю таблицы под v2 (данные демо будут засеяны заново)"
+            )
+            drop = True
         if drop:
-            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(_drop_everything)
         await conn.run_sync(Base.metadata.create_all)
+
+
+def _is_outdated_schema(sync_conn) -> bool:
+    """True, если в БД схема v1 (нет колонки investigations.owner_id / есть users.role)."""
+    from sqlalchemy import inspect
+
+    insp = inspect(sync_conn)
+    tables = set(insp.get_table_names())
+    if "investigations" in tables:
+        cols = {c["name"] for c in insp.get_columns("investigations")}
+        if "owner_id" not in cols or "handoff_to" not in cols:
+            return True
+    if "users" in tables and "role" in {c["name"] for c in insp.get_columns("users")}:
+        return True
+    if "max_chats" in tables or "feedback" in tables:
+        return True
+    if "chat_messages" in tables:
+        cols = {c["name"] for c in insp.get_columns("chat_messages")}
+        if not {"platform", "message_url", "views", "archived"} <= cols:
+            return True
+    if "source_chats" in tables:
+        if not {"username", "kind", "url", "ref"} <= {c["name"] for c in insp.get_columns("source_chats")}:
+            return True
+    return False
+
+
+def _drop_everything(sync_conn) -> None:
+    """Удалить и текущие, и устаревшие таблицы (v1: max_chats, feedback)."""
+    from sqlalchemy import MetaData
+
+    from sqlalchemy import inspect, text
+
+    try:
+        meta = MetaData()
+        meta.reflect(bind=sync_conn)  # сначала отражаем всё, что есть (включая таблицы v1)
+        meta.drop_all(sync_conn)
+        Base.metadata.drop_all(sync_conn, checkfirst=True)
+        return
+    except Exception as e:  # noqa: BLE001  битые FK (ссылки на отсутствующие таблицы) и т.п.
+        import logging
+
+        logging.getLogger("newsflow").warning("drop_all via reflect failed (%r) — DROP TABLE по списку", e)
+    dialect = sync_conn.dialect.name
+    if dialect == "mysql":
+        sync_conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+    elif dialect == "sqlite":
+        sync_conn.execute(text("PRAGMA foreign_keys=OFF"))
+    q = sync_conn.dialect.identifier_preparer.quote
+    for name in inspect(sync_conn).get_table_names():
+        sync_conn.execute(text(f"DROP TABLE IF EXISTS {q(name)}"))
+    if dialect == "mysql":
+        sync_conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
 
 async def dispose() -> None:

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import icon, platform %}
+{% block title %}Источники{% endblock %}
+{% block content %}
+<div class="wrap">
+  <div class="page-title">
+    <h1>Источники</h1>
+    <div class="btn-row">
+      <button class="btn" type="button" data-api="POST /api/sources/sync" data-done="Опрос источников завершён">{{ icon('refresh') }}Опросить сейчас</button>
+      {% if demo and demo.enabled %}
+      <button class="btn" type="button" data-api="POST /api/demo/restart" data-done="Демо-поток перезапущен" data-confirm="Перезапустить демо-поток? Текущие сообщения уйдут в архив, сюжеты останутся.">{{ icon('radar') }}Перезапустить демо-поток</button>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if demo and demo.enabled %}
+  <p class="muted" style="margin:0 4px 14px;font-size:14px">
+    Демо-поток: {% if demo.finished %}все {{ demo.total }} сообщений сценария уже показаны{% elif demo.active %}показано {{ demo.released }} из {{ demo.total }}, следующее — <span class="t">{{ demo.next_at|dt('time') if demo.next_at else 'скоро' }}</span>{% else %}выключен{% endif %}.
+  </p>
+  {% endif %}
+
+  <div class="pane">
+    <div class="pane__head"><h2>Чаты и каналы</h2><span class="count">{{ chats|length }}</span></div>
+    <div class="pane__body">
+      <form class="btn-row" method="post" action="/sources/add" data-add-source style="align-items:flex-end;margin-bottom:14px">
+        <div class="field" style="margin:0">
+          <label for="src-pf">Платформа</label>
+          <select class="input" id="src-pf" name="platform" style="width:150px">
+            <option value="telegram">Telegram</option>
+            <option value="max">MAX</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0;flex:1;min-width:220px">
+          <label for="src-ref">Канал или чат</label>
+          <input class="input" id="src-ref" name="ref" required placeholder="@channel или https://t.me/channel">
+        </div>
+        <div class="field" style="margin:0;width:200px;max-width:100%">
+          <label for="src-d">Район (необязательно)</label>
+          <input class="input" id="src-d" name="district" placeholder="Чертаново">
+        </div>
+        <button class="btn btn--primary" type="submit">{{ icon('plus') }}Добавить источник</button>
+      </form>
+      <p class="muted" style="font-size:13px;margin:-4px 0 14px">Публичные Telegram-каналы и чаты читаются по ссылке. Домовые чаты MAX подключаются ботом, которого добавил администратор чата с согласия участников.</p>
+
+      {% if chats %}
+      <table class="table">
+        <thead><tr><th>Источник</th><th>Район</th><th class="num">Сообщений</th><th class="num">Последнее сообщение</th><th class="num">Опрос</th><th>Слушать</th></tr></thead>
+        <tbody>
+          {% for c in chats %}
+          <tr>
+            <td>{{ platform(c.platform|ev) }} <b style="margin-left:4px">{{ c.title }}</b>
+              {% if c.ref %}<div class="muted" style="font-size:13px;overflow-wrap:anywhere">{% if c.ref|safe_url %}<a href="{{ c.ref }}" target="_blank" rel="noopener noreferrer">{{ c.ref }}</a>{% else %}{{ c.ref }}{% endif %}</div>{% endif %}</td>
+            <td>{{ c.district or '—' }}</td>
+            <td class="num">{{ c.messages_count }}</td>
+            <td class="num">{{ last_msg.get(c.id)|dt if last_msg.get(c.id) else '—' }}</td>
+            <td class="num">{% if not c.enabled %}<span class="muted">выключен</span>{% elif c.last_synced_at %}{{ c.last_synced_at|ago }}{% else %}<span class="muted">ещё не было</span>{% endif %}</td>
+            <td><label class="switch" title="{{ 'Слушаем' if c.enabled else 'Не слушаем' }}"><input type="checkbox" data-toggle-chat="{{ c.id }}" {{ 'checked' if c.enabled }} aria-label="Слушать {{ c.title }}"><span></span></label></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty"><b>Источников нет</b>Добавьте публичный Telegram-канал формой выше.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <h2 class="section-gap" style="margin:24px 4px 4px">Стиль каналов</h2>
+  <p class="muted" style="margin:0 4px 12px;font-size:14px">AI пишет черновик в манере канала: длина, заголовок, абзацы, хэштеги. Профиль строится по последним постам.</p>
+  <div class="dna">
+    {% for ch in channels %}
+    {% set d = ch.dna_json or {} %}
+    <section class="pane dna__card">
+      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><h3 style="margin-right:auto">{{ ch.name }}</h3>{% if ch.handle %}<span class="muted">{{ ch.handle }}</span>{% endif %}</div>
+      {% if ch.description %}<p class="muted" style="font-size:13.5px;margin:4px 0 0">{{ ch.description }}</p>{% endif %}
+      {% if d %}
+      <dl class="kv">
+        <dt>Тон</dt><dd>{{ d.tone or '—' }}</dd>
+        <dt>Средняя длина</dt><dd>{{ d.avg_length or '—' }} знаков</dd>
+        <dt>Абзацев</dt><dd>{{ d.avg_paragraphs or '—' }}</dd>
+        <dt>Эмодзи на пост</dt><dd>{{ d.emoji_per_post if d.emoji_per_post is not none else '—' }}</dd>
+        <dt>Постов в анализе</dt><dd>{{ d.posts_analyzed or '—' }}</dd>
+      </dl>
+      {% if d.rules %}<ul class="dna__rules">{% for r in d.rules %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+      {% else %}<p class="muted">Профиль ещё не построен.</p>{% endif %}
+      <div class="btn-row" style="margin-top:12px">
+        <button class="btn btn--sm" type="button" data-api="POST /api/channels/{{ ch.id }}/dna" data-done="Профиль канала обновлён">{{ icon('refresh') }}Пересчитать профиль</button>
+        {% if ch.dna_updated_at %}<span class="muted" style="font-size:13px">обновлён {{ ch.dna_updated_at|ago }}</span>{% endif %}
+      </div>
+    </section>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import status as status_chip %}
+{% block title %}Статистика{% endblock %}
+{% block content %}
+<div class="wrap">
+  <div class="page-title"><h1>Статистика</h1></div>
+  <div class="stats">
+    <section class="pane stat">
+      <div class="stat__label">От сигнала до передачи</div>
+      <div class="stat__v">{{ stats.avg_signal_to_handoff_sec|dur }}</div>
+      <div class="stat__hint">Среднее время от первого сообщения в чате до «Передать дальше».</div>
+    </section>
+    <section class="pane stat">
+      <div class="stat__label">От сигнала до справки</div>
+      <div class="stat__v">{{ stats.avg_signal_to_review_sec|dur }}</div>
+      <div class="stat__hint">Сколько AI собирает справку и черновик.</div>
+    </section>
+    <section class="pane stat">
+      <div class="stat__label">Передано / не подтвердилось</div>
+      <div class="stat__v">{{ stats.handed_off or 0 }} / {{ stats.rejected or 0 }}</div>
+      <div class="stat__hint">В работе сейчас: {{ stats.in_work or 0 }}, всего сюжетов: {{ stats.stories_total or 0 }}.</div>
+    </section>
+    <section class="pane stat">
+      <div class="stat__label">Утверждения со ссылкой</div>
+      <div class="stat__v">{{ stats.traceability|pct }}</div>
+      <div class="stat__hint">Доля утверждений черновика, у которых есть источник. Цель — 100%.</div>
+    </section>
+    <section class="pane stat">
+      <div class="stat__label">Поправлено при проверке</div>
+      <div class="stat__v">{{ stats.factcheck_correction_rate|pct }}</div>
+      <div class="stat__hint">Доля фактов, которые вы отметили как «не подтверждён» или «ложь».</div>
+    </section>
+    <section class="pane stat">
+      <div class="stat__label">Текст AI принят почти без правок</div>
+      <div class="stat__v">{{ stats.draft_acceptance_rate|pct }}</div>
+      <div class="stat__hint">Совпадение с AI-версией 85% и выше.</div>
+    </section>
+  </div>
+
+  <div class="pane section-gap">
+    <div class="pane__head"><h2>Последние передачи</h2></div>
+    <div class="pane__body">
+      {% if stats.recent_handoffs %}
+      <table class="table">
+        <thead><tr><th>Сюжет</th><th>Кому</th><th>Канал</th><th class="num">Когда</th><th class="num">От сигнала</th></tr></thead>
+        <tbody>
+          {% for h in stats.recent_handoffs %}
+          <tr>
+            <td><a class="row-link" href="/stories/{{ h.id }}">{{ h.title }}</a></td>
+            <td>{{ h.handoff_to or '—' }}</td>
+            <td>{{ h.handoff_channel_label or HANDOFF_CHANNELS.get(h.handoff_channel, h.handoff_channel or '—') }}</td>
+            <td class="num">{{ h.handed_off_at|dt }}</td>
+            <td class="num">{{ h.signal_to_handoff_sec|dur }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty" style="padding:8px 0"><b>Пока ничего не передано</b>Когда сюжет подтвердится, нажмите «Передать дальше» на его странице.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if stats.by_status %}
+  <div class="pane section-gap">
+    <div class="pane__head"><h2>По статусам</h2></div>
+    <div class="pane__body">
+      <div class="btn-row" style="gap:18px">
+        {% for s in STATUS_ORDER %}<a href="/stories?status={{ s|ev }}" style="text-decoration:none">{{ status_chip(s) }} <b class="t" style="font-size:18px;margin-left:4px">{{ stats.by_status.get(s|ev, 0) }}</b></a>{% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

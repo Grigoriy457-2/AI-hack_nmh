@@ -15,11 +15,13 @@ run_investigation(id)``). Пайплайн открывает СВОИ сесс�
 4. media        — MEDIA FINDER -> media_items.
 5. dna          — ai.channel_dna.ensure_channel_dna для канала расследования.
 6. report       — reports.report_json (9 разделов) + drafts v1 (author_kind=ai, claims_json).
-Финал: workflow.transition(researching -> report_ready, user=None), report_ready_at=now.
+Финал: workflow.transition(researching -> review, user=None), review_at=now (первый раз).
 Ошибка: progress.error, stage.status="error", статус остаётся researching (оператор видит «зависшую»).
 Каждая запись прогресса — отдельный commit, чтобы GET /progress видел живой лог.
 
-Повторный запуск (report_ready -> researching) удаляет прошлые итерации/источники/медиа/справку;
+«Копать глубже» / перезапуск (review -> researching): вопросы редактора из
+``investigations.deeper_questions`` дают +1 итерацию CHAIN SEARCH и доп. запросы агентам.
+Повторный запуск удаляет прошлые итерации/источники/медиа/справку;
 черновики сохраняются, новый AI-черновик получает следующий номер версии.
 
 Демо-паузы: в mock-режиме LLM и без PIPELINE_INLINE между шагами есть ``asyncio.sleep`` (всего
@@ -128,6 +130,8 @@ class PipelineContext:
     media: list[MediaItem] = field(default_factory=list)
     notes: dict[str, str] = field(default_factory=dict)
     pending: list[tuple[Source, dict[str, Any]]] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)  # «Копать глубже»: вопросы редактора
+    prev_iterations: int = 0  # сколько итераций было в прошлом прогоне (для «Копать глубже»: +1)
 
 
 # ---------------------------------------------------------------- утилиты
@@ -181,6 +185,11 @@ async def run_investigation(investigation_id: int) -> None:
                 log.warning("pipeline: investigation %s not found", investigation_id)
                 return
             ctx = PipelineContext(investigation_id=investigation_id, inv=inv, lead_text=inv.lead_text or "")
+            ctx.questions = [str(q.get("question") or "").strip() for q in (inv.deeper_questions or [])
+                             if isinstance(q, dict) and str(q.get("question") or "").strip()]
+            ctx.prev_iterations = int(await session.scalar(
+                select(func.count()).select_from(SearchIteration).where(SearchIteration.investigation_id == investigation_id)
+            ) or 0)
             await progress_init(session, inv)
             await _reset_previous_run(session, investigation_id)
             funcs = {
@@ -224,17 +233,17 @@ async def _finish(session: AsyncSession, ctx: PipelineContext) -> None:
         try:
             from app.services import workflow
 
-            await workflow.transition(session, inv, InvestigationStatus.report_ready, None,
+            await workflow.transition(session, inv, InvestigationStatus.review, None,
                                       "NEWSFLOW: справка и черновик готовы")
         except NotImplementedError:
             prev = inv.status
-            inv.status = InvestigationStatus.report_ready
+            inv.status = InvestigationStatus.review
             inv.updated_at = utcnow()
             session.add(StatusHistory(investigation_id=inv.id, from_status=prev,
-                                      to_status=InvestigationStatus.report_ready, user_id=None,
+                                      to_status=InvestigationStatus.review, user_id=None,
                                       comment="NEWSFLOW: справка и черновик готовы"))
-        if inv.report_ready_at is None:
-            inv.report_ready_at = utcnow()
+        if inv.review_at is None:
+            inv.review_at = utcnow()
     else:
         log.warning("pipeline: investigation %s is %s, not researching — status unchanged", inv.id, inv.status)
     await progress_update(session, inv, message="Готово: справка и черновик сформированы", percent=100, done=True)
@@ -356,11 +365,11 @@ def _normalize_entities(ent: dict[str, Any], lead: str) -> dict[str, Any]:
 async def _detect_scenario_anchor(session: AsyncSession) -> None:
     """Якорь сценария = время сообщения m01 в БД − его смещение (чтобы веб/чаты совпали по дате)."""
     ref = md.SCENARIO_MAX_MESSAGES[0]
+    # по тексту (после «перезапуска демо-потока» external_id получают суффикс эпохи), без архивных
     sent = await session.scalar(
-        select(ChatMessage.sent_at).where(ChatMessage.external_id == ref["external_id"]).order_by(ChatMessage.sent_at.desc()).limit(1)
+        select(ChatMessage.sent_at).where(ChatMessage.text == ref["text"], ChatMessage.archived.is_(False))
+        .order_by(ChatMessage.sent_at.desc()).limit(1)
     )
-    if sent is None:
-        sent = await session.scalar(select(ChatMessage.sent_at).where(ChatMessage.text == ref["text"]).limit(1))
     if sent is not None:
         from datetime import timedelta
 
@@ -392,12 +401,24 @@ def _normalize_queries(raw: Any, ctx: PipelineContext, n: int) -> list[dict[str,
         for agent in AGENTS:
             if agent not in per_agent:
                 out.append({"agent": agent, "query": base + (" фото видео" if agent == "media" else "")})
+    if ctx.questions and n == 1:  # «Копать глубже»: запросы по вопросам редактора
+        loc = ((ctx.entities.get("location") or {}).get("text") or "").split(",")[0]
+        for qtext in ctx.questions[-3:]:
+            for agent in ("web", "max_chats", "official"):
+                query = " ".join(f"{loc} {qtext}".split())[:300]
+                if (agent, query.lower()) not in seen:
+                    seen.add((agent, query.lower()))
+                    out.append({"agent": agent, "query": query})
     return out
 
 
 async def stage_chain_search(session: AsyncSession, ctx: PipelineContext) -> None:
     await _ensure_chat_pool(session, ctx)
     max_it = max(1, int(settings.CHAIN_MAX_ITERATIONS))
+    if ctx.questions:  # «Копать глубже» — на одну итерацию больше, чем в прошлом прогоне
+        max_it = max(max_it, ctx.prev_iterations) + 1
+    if ctx.questions:
+        await _log(session, ctx, "search", "Копать глубже, вопрос редактора: " + ctx.questions[-1])
     lo, hi = STAGE_PERCENT["search"]
     findings: list[str] = []
     n = 1
@@ -405,12 +426,17 @@ async def stage_chain_search(session: AsyncSession, ctx: PipelineContext) -> Non
         hyp = await _llm_json("chain_hypotheses", {
             "lead_text": ctx.lead_text, "entities": ctx.entities, "n": n, "max_iterations": max_it,
             "previous": ctx.iterations, "findings": findings[:30],
+            **({"editor_questions": ctx.questions} if ctx.questions else {}),
         })
-        if n > 1 and not hyp.get("continue", True):
+        if n > 1 and not hyp.get("continue", True) and not ctx.questions:
             await _log(session, ctx, "search", f"Цепочка остановлена после итерации {n - 1}: "
                        f"{hyp.get('rationale') or 'новых гипотез нет'}")
             break
         queries = _normalize_queries(hyp.get("queries"), ctx, n)
+        if not queries and ctx.questions:  # «Копать глубже»: гипотез нет — ищем по вопросу редактора
+            loc = ((ctx.entities.get("location") or {}).get("text") or "").split(",")[0]
+            queries = [{"agent": a, "query": " ".join(f"{loc} {ctx.questions[-1]}".split())[:300]}
+                       for a in ("web", "max_chats")]
         if not queries:
             break
         rationale = str(hyp.get("rationale") or "").strip() or None
@@ -471,7 +497,7 @@ def _save_results(session: AsyncSession, ctx: PipelineContext, q: dict[str, str]
             if mid in ctx.seen_messages:
                 continue
             ctx.seen_messages.add(mid)
-            url = md.max_message_url(r["chat_external_id"], r["external_id"])
+            url = r.get("message_url") or md.max_message_url(r["chat_external_id"], r["external_id"])
             ctx.seen_urls.add(url)
             src = Source(
                 investigation_id=ctx.investigation_id, kind=SourceKind.max_chat,
@@ -527,7 +553,8 @@ async def _ensure_chat_pool(session: AsyncSession, ctx: PipelineContext) -> None
         return
     rows = (await session.execute(
         select(ChatMessage, MaxChat).join(MaxChat, ChatMessage.chat_id == MaxChat.id)
-        .where(MaxChat.enabled.is_(True)).order_by(ChatMessage.sent_at.desc()).limit(1000)
+        .where(MaxChat.enabled.is_(True), ChatMessage.archived.is_(False))
+        .order_by(ChatMessage.sent_at.desc()).limit(1000)
     )).all()
     if not rows:
         total = await session.scalar(select(func.count()).select_from(ChatMessage))
@@ -539,13 +566,15 @@ async def _ensure_chat_pool(session: AsyncSession, ctx: PipelineContext) -> None
                 await _log(session, ctx, "search", f"Синхронизация MAX: новых сообщений {res.new_messages}")
                 rows = (await session.execute(
                     select(ChatMessage, MaxChat).join(MaxChat, ChatMessage.chat_id == MaxChat.id)
-                    .where(MaxChat.enabled.is_(True)).order_by(ChatMessage.sent_at.desc()).limit(1000)
+                    .where(MaxChat.enabled.is_(True), ChatMessage.archived.is_(False))
+                    .order_by(ChatMessage.sent_at.desc()).limit(1000)
                 )).all()
             except Exception as e:  # noqa: BLE001
                 log.warning("MAX sync before search failed: %r", e)
     ctx.chat_pool = [{
         "chat_message_id": m.id, "external_id": m.external_id, "chat_external_id": c.external_id,
         "chat_title": c.title, "author_external_id": m.author_external_id, "author_name": m.author_name,
+        "platform": c.platform or "max", "message_url": m.message_url,
         "text": m.text, "sent_at": m.sent_at, "has_media": bool(m.has_media), "media_url": m.media_url,
         "is_forwarded": bool(m.is_forwarded), "_stems": stems(m.text),
     } for m, c in rows]
@@ -971,7 +1000,7 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
 
 def _report_contacts(ctx: PipelineContext) -> list[dict[str, Any]]:
     """Один контакт на автора (первое уникальное сообщение), сначала — с телефоном. Без самого номера:
-    телефон отдаёт только /api/.../contacts (роли producer/operator)."""
+    телефон отдаёт только /api/.../contacts (редактор)."""
     by_author: dict[str, dict[str, Any]] = {}
     for c in ctx.contacts:
         key = c["author_external_id"] or f"src{c['source_id']}"

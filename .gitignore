@@ -24,3 +24,8 @@ env/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Telegram: сессия = доступ к аккаунту
+*.session
+*.session-journal
+data/telegram/

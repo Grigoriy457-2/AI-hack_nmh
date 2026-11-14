@@ -3,85 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}NEWSFLOW AI{% endblock %} · NEWSFLOW AI</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 23V9l14 14V9' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <title>{% block title %}Радар{% endblock %} — NEWSFLOW</title>
+  <script>try{var t=localStorage.getItem('nf-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%231f3a6b'/%3E%3Cpath d='M9 23V9l14 14V9' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='6' y='26' width='20' height='2.4' fill='%23f4d23c'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="{{ asset('style.css') }}">
   {% block head %}{% endblock %}
 </head>
-<body class="page-{{ nav_active or 'none' }}">
-{% from "partials/_macros.html" import avatar %}
-<header class="nf-header">
-  <div class="nf-header__inner">
-    <a class="nf-logo" href="/" aria-label="NEWSFLOW AI — на главную">
-      <svg viewBox="0 0 32 32" aria-hidden="true">
-        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#c026d3"/></linearGradient></defs>
-        <rect width="32" height="32" rx="9" fill="url(#lg)"/>
-        <path d="M9 23V9l14 14V9" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="25.5" cy="6.5" r="2.4" fill="#fde047"/>
-      </svg>
-      <span>NEWSFLOW <b>AI</b></span>
-    </a>
+<body class="page-{{ nav_active or 'none' }}{% block body_class %}{% endblock %}">
+{% from "partials/_macros.html" import icon %}
+<header class="top">
+  <a class="logo" href="/" aria-label="NEWSFLOW — на радар">
+    <span class="logo__mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18V6l12 12V6" stroke="currentColor" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+    <span>NEWSFLOW <b>AI</b></span>
+  </a>
+  {% if user %}
+  <nav class="nav" aria-label="Разделы">
+    <a href="/" class="{{ 'is-active' if nav_active == 'radar' }}">Радар</a>
+    <a href="/stories" class="{{ 'is-active' if nav_active in ('stories', 'story') }}">Сюжеты</a>
+    <a href="/sources" class="{{ 'is-active' if nav_active == 'sources' }}">Источники</a>
+    <a href="/stats" class="{{ 'is-active' if nav_active == 'stats' }}">Статистика</a>
+  </nav>
+  {% endif %}
+  <div class="top__right">
     {% if user %}
-    <nav class="nf-nav" aria-label="Основное меню">
-      {% set r = user.role.value %}
-      {% if r == 'operator' %}
-        <a href="/operator" class="{{ 'is-active' if nav_active == 'operator' }}">Пульт оператора</a>
-        <a href="/?view=producer" class="{{ 'is-active' if nav_active == 'dashboard' }}">Все зацепки</a>
-        <a href="/investigations/new" class="{{ 'is-active' if nav_active == 'new' }}">Новая зацепка</a>
-        <a href="/?view=editor">Очередь редактора</a>
-        <a href="/?view=smm">Публикации</a>
-      {% elif r == 'producer' %}
-        <a href="/" class="{{ 'is-active' if nav_active == 'dashboard' }}">Мои зацепки</a>
-        <a href="/investigations/new" class="{{ 'is-active' if nav_active == 'new' }}">+ Новая зацепка</a>
-        <a href="/feedback" class="{{ 'is-active' if nav_active == 'feedback' }}">Норм / стрём</a>
-      {% elif r == 'editor' %}
-        <a href="/" class="{{ 'is-active' if nav_active in ('dashboard', 'edit') }}">Очередь на редактуру</a>
-      {% elif r == 'smm' %}
-        <a href="/" class="{{ 'is-active' if nav_active == 'dashboard' }}">Готово к публикации</a>
-      {% endif %}
-    </nav>
-    <div class="nf-user" data-dropdown>
-      <button type="button" aria-haspopup="true" aria-expanded="false" title="Сменить пользователя">
-        {{ avatar(user) }}
-        <span class="nf-user__meta"><span class="nf-user__name">{{ user.name }}</span><span class="nf-user__role">{{ user.role|role_label }}</span></span>
-      </button>
-      <div class="nf-user__menu" role="menu">
-        <h4>Быстро сменить роль (демо)</h4>
-        {% for u in all_users %}
-        <form method="post" action="/login">
-          <input type="hidden" name="user_id" value="{{ u.id }}">
-          <input type="hidden" name="password" value="demo">
-          <button type="submit" class="switch {{ 'is-current' if u.id == user.id }}" {{ 'disabled' if u.id == user.id }}>
-            {{ avatar(u, 'sm') }}
-            <span><b>{{ u.name }}</b><br><small class="muted">{{ u.role|role_label }}</small></span>
-          </button>
-        </form>
-        {% endfor %}
-        <a class="logout" href="/logout">Выйти</a>
-      </div>
-    </div>
-    {% else %}
-    <div class="spacer"></div>
+    <span class="onair" id="onair" title="Лента обновляется сама"><span class="onair__dot"></span><span class="onair__label">В эфире{% if live_sources_count is defined and live_sources_count %}: {{ live_sources_count }} {{ plural(live_sources_count, 'источник', 'источника', 'источников') }}{% endif %}</span></span>
+    {% endif %}
+    <button class="icon-btn" type="button" id="theme-toggle" aria-label="Переключить тему" title="Светлая / тёмная тема">
+      <span data-when="dark">{{ icon('sun') }}</span><span data-when="light" hidden>{{ icon('moon') }}</span>
+    </button>
+    {% if user %}
+    <a class="who" href="/logout" title="Выйти">
+      <span class="who__av">{{ user.name|initials }}</span><span class="who__name">{{ user.name }}</span>{{ icon('logout') }}
+    </a>
     {% endif %}
   </div>
 </header>
 
-<main class="nf-main">
+<main class="page">
   {% if flash %}
   <div class="flash flash--{{ flash.level if flash.level in ('ok', 'warn', 'err') else 'ok' }}" role="status">{{ flash.text }}</div>
   {% endif %}
   {% block content %}{% endblock %}
 </main>
 
-<footer class="nf-footer">NEWSFLOW AI · MVP для хакатона NMH · NEWSFLOW не публикует сам — решения принимают люди</footer>
-
-<div class="drawer-backdrop" data-drawer-close></div>
-<aside class="drawer" id="drawer" aria-hidden="true">
-  <div class="drawer__head"><h3 id="drawer-title">Источник</h3><button class="drawer__close" type="button" data-drawer-close aria-label="Закрыть">×</button></div>
-  <div class="drawer__body" id="drawer-body"></div>
-</aside>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-
 {% block data %}{% endblock %}
 <script src="{{ asset('app.js') }}"></script>
 {% block scripts %}{% endblock %}

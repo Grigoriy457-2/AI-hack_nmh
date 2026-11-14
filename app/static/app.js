@@ -1,574 +1,805 @@
-/* NEWSFLOW AI — клиентская логика (vanilla JS, без сборки). Зона DEV-FRONTEND.
- * Вкладки, живой прогресс пайплайна, панель источников, подсветка утверждений,
- * отметки фактов без перезагрузки, word-level diff в редакторе. */
+/* NEWSFLOW AI — клиентская часть. Без сборки и зависимостей.
+   Контракт API: docs/CONTRACTS_v2.md. */
 (function () {
-  "use strict";
+  'use strict';
 
+  // ================================================================ утилиты
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
   var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
 
   function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
-  }
-  function readJSON(id, fallback) {
-    var el = document.getElementById(id);
-    if (!el) return fallback;
-    try { return JSON.parse(el.textContent || "null") || fallback; } catch (e) { return fallback; }
   }
   function store(key, val) {
-    try { if (val === undefined) return localStorage.getItem(key); localStorage.setItem(key, val); } catch (e) { return null; }
+    try {
+      if (val === undefined) return localStorage.getItem(key);
+      if (val === null) localStorage.removeItem(key); else localStorage.setItem(key, val);
+    } catch (e) { return null; }
     return null;
   }
-
-  var MONTHS = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
-  /* naive UTC ISO -> МСК */
-  function fmtTime(iso, withSec) {
-    if (!iso) return "";
+  function parseISO(iso) {
+    if (!iso) return null;
     var s = String(iso);
-    if (!/[zZ]|[+-]\d\d:?\d\d$/.test(s)) s += "Z";
+    if (!/[zZ]|[+-]\d\d:?\d\d$/.test(s)) s += 'Z';   // сервер отдаёт naive UTC
     var d = new Date(s);
-    if (isNaN(d)) return String(iso);
-    var m = new Date(d.getTime() + 3 * 3600 * 1000);
-    var p = function (n) { return (n < 10 ? "0" : "") + n; };
-    return p(m.getUTCHours()) + ":" + p(m.getUTCMinutes()) + (withSec ? ":" + p(m.getUTCSeconds()) : "");
+    return isNaN(d) ? null : d;
+  }
+  var timeFmt;
+  try { timeFmt = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' }); }
+  catch (e) { timeFmt = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }); }
+  function hhmm(iso) { var d = parseISO(iso); return d ? timeFmt.format(d) : '—'; }
+  function plural(n, one, few, many) {
+    n = Math.abs(n) % 100; var n1 = n % 10;
+    if (n > 10 && n < 20) return many;
+    if (n1 > 1 && n1 < 5) return few;
+    if (n1 === 1) return one;
+    return many;
   }
 
-  /* ------------------------------------------------------------ тост */
+  function api(method, url, body) {
+    var opt = { method: method, headers: { 'Accept': 'application/json' }, credentials: 'same-origin' };
+    if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    return fetch(url, opt).then(function (r) {
+      if (r.status === 401) { location.href = '/login'; throw new Error('Нужно войти заново'); }
+      if (r.status === 204) return null;
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+        if (!r.ok) {
+          var d = data && data.detail;
+          if (Array.isArray(d)) d = d.map(function (x) { return x.msg; }).join('; ');
+          throw new Error(d || ({ 404: 'Не найдено (404)', 409: 'Сейчас это действие недоступно (409)', 422: 'Сервер не принял данные (422) — проверьте поля' }[r.status] || 'Ошибка сервера: ' + r.status));
+        }
+        return data;
+      });
+    });
+  }
+
   var toastTimer;
   function toast(msg, isErr) {
-    var t = $("#toast");
+    var t = $('#toast');
     if (!t) return;
     t.textContent = msg;
-    t.className = "toast is-on" + (isErr ? " toast--err" : "");
+    t.classList.toggle('is-err', !!isErr);
+    t.classList.add('is-on');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.className = "toast"; }, 2800);
+    toastTimer = setTimeout(function () { t.classList.remove('is-on'); }, isErr ? 6000 : 3200);
+  }
+  function reloadWith(msg) {
+    try { sessionStorage.setItem('nf-toast', msg); } catch (e) { /* без сообщения */ }
+    location.reload();
+  }
+  function goWith(url, msg) {
+    try { if (msg) sessionStorage.setItem('nf-toast', msg); } catch (e) { /* ок */ }
+    location.href = url;
+  }
+  function busy(btn, on) {
+    if (!btn) return;
+    btn.disabled = !!on;
+    btn.classList.toggle('is-busy', !!on);
+  }
+  function readJSON(id) {
+    var el = document.getElementById(id);
+    if (!el) return null;
+    try { return JSON.parse(el.textContent); } catch (e) { return null; }
   }
 
-  /* ------------------------------------------------------------ меню пользователя */
-  $$("[data-dropdown]").forEach(function (dd) {
-    var btn = $("button", dd);
-    btn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      var open = dd.classList.toggle("is-open");
-      btn.setAttribute("aria-expanded", open ? "true" : "false");
+  var ICON = {
+    phone: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>',
+    image: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>',
+    search: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg>',
+    grow: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-6 4 4 6-7M15 8h5v5"/></svg>',
+    fwd: '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5l6 6-6 6M20 11H9a5 5 0 0 0-5 5v3"/></svg>'
+  };
+  var PF = {
+    max: { label: 'MAX', short: 'MAX', svg: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.5L8 2.5l5 4V12H7l-3 2v-2H3z"/></svg>' },
+    telegram: { label: 'Telegram', short: 'TG', svg: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="7.5" r="5.5"/><path d="M4.2 11.6L3 14l3-1.2"/></svg>' }
+  };
+  function pfHTML(p, short) {
+    var x = PF[p] || PF.max;
+    return '<span class="pf pf--' + esc(p || 'max') + '" title="' + x.label + '">' + x.svg + (short ? x.short : x.label) + '</span>';
+  }
+  var STATUS_LABELS = { 'new': 'Новый', researching: 'AI ищет', review: 'На проверке', handed_off: 'Передано дальше', rejected: 'Не подтвердилось' };
+  function statusHTML(s, label) {
+    return '<span class="status status--' + esc(s) + '">' + esc(label || STATUS_LABELS[s] || s) + '</span>';
+  }
+
+  // ================================================================ общее: тема, подсказки, колонки
+  function initTheme() {
+    var btn = $('#theme-toggle');
+    function current() { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
+    function paint() {
+      var t = current();
+      $$('[data-when]', btn).forEach(function (el) { el.hidden = el.getAttribute('data-when') !== t; });
+    }
+    if (!btn) return;
+    paint();
+    btn.addEventListener('click', function () {
+      var next = current() === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      store('nf-theme', next);
+      paint();
     });
-  });
-  document.addEventListener("click", function (e) {
-    $$("[data-dropdown].is-open").forEach(function (dd) { if (!dd.contains(e.target)) dd.classList.remove("is-open"); });
-  });
-
-  /* ------------------------------------------------------------ подсказки для жюри */
-  $$("[data-hint]").forEach(function (h) {
-    var key = "nf-hint-" + h.getAttribute("data-hint");
-    if (store(key) === "hidden") h.classList.add("hidden");
-    var close = $(".hint__close", h);
-    if (close) close.addEventListener("click", function () { h.classList.add("hidden"); store(key, "hidden"); });
-  });
-
-  /* ------------------------------------------------------------ вкладки */
-  var tabsNav = $("[data-tabs]");
-  function activateTab(name, push) {
-    if (!tabsNav) return false;
-    var btn = $('[data-tab="' + name + '"]', tabsNav);
-    if (!btn) return false;
-    $$("[data-tab]", tabsNav).forEach(function (b) {
-      var on = b === btn;
-      b.classList.toggle("is-active", on);
-      b.setAttribute("aria-selected", on ? "true" : "false");
-    });
-    $$("[data-panel]").forEach(function (p) { p.classList.toggle("is-active", p.getAttribute("data-panel") === name); });
-    if (push !== false) {
-      try {
-        var u = new URL(location.href);
-        u.searchParams.set("tab", name);
-        u.searchParams.delete("msg"); u.searchParams.delete("level");
-        u.hash = "";
-        history.replaceState(null, "", u.toString());
-      } catch (e) { /* ignore */ }
-    }
-    return true;
   }
-  if (tabsNav) {
-    tabsNav.addEventListener("click", function (e) {
-      var b = e.target.closest("[data-tab]");
-      if (b) activateTab(b.getAttribute("data-tab"));
+
+  function initHints() {
+    $$('details[data-hint]').forEach(function (d) {
+      var key = 'nf-hint-' + d.getAttribute('data-hint');
+      var saved = store(key);
+      // по умолчанию подсказка открыта на десктопе и свёрнута на телефоне
+      d.open = saved ? saved === 'open' : !window.matchMedia('(max-width: 860px)').matches;
+      d.addEventListener('toggle', function () { store(key, d.open ? 'open' : 'closed'); });
     });
   }
-  document.addEventListener("click", function (e) {
-    var g = e.target.closest("[data-goto-tab]");
-    if (g) { activateTab(g.getAttribute("data-goto-tab")); window.scrollTo({ top: 0, behavior: "smooth" }); }
-  });
 
-  function flash(el) {
-    if (!el) return;
-    el.classList.add("is-flash");
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    setTimeout(function () { el.classList.remove("is-flash"); }, 2200);
+  function showColumn(id) {
+    var desk = $('[data-desk]');
+    if (!desk) return;
+    $$(':scope > *', desk).forEach(function (c) { c.classList.toggle('is-shown', c.id === id); });
+    $$('.switcher [data-show]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-show') === id)); });
   }
-  // якорь на пункт справки после отметки факта / перехода
-  if (location.hash && location.hash.length > 1) {
-    var target = document.getElementById(location.hash.slice(1));
-    if (target) {
-      var panel = target.closest("[data-panel]");
-      if (panel) activateTab(panel.getAttribute("data-panel"), false);
-      setTimeout(function () { flash(target); }, 150);
-    }
+  function initSwitcher() {
+    $$('.switcher [data-show]').forEach(function (b) {
+      b.addEventListener('click', function () { showColumn(b.getAttribute('data-show')); window.scrollTo(0, 0); });
+    });
   }
 
-  /* ------------------------------------------------------------ панель источника */
-  var SOURCES = readJSON("nf-sources", {});
-  var CLAIMS = readJSON("nf-claims", []);
-  var STATES = readJSON("nf-states", {});
-  var STATE_LABEL = { confirmed: "подтверждён", unconfirmed: "не подтверждён", "false": "ложь" };
+  function initDialogs() {
+    $$('[data-open]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var d = document.getElementById(b.getAttribute('data-open'));
+        if (!d) return;
+        if (typeof d.showModal === 'function') d.showModal(); else d.setAttribute('open', '');
+        d.dispatchEvent(new CustomEvent('nf-open'));
+        var f = $('textarea, input:not([type=radio])', d);
+        if (f) f.focus();
+      });
+    });
+    $$('dialog [data-close]').forEach(function (b) {
+      b.addEventListener('click', function () { var d = b.closest('dialog'); if (d.close) d.close(); else d.removeAttribute('open'); });
+    });
+  }
 
-  function claimState(c) {
-    if (c.state) return c.state;
-    var s = STATES[String(c.id)];
-    if (s && s.state) return s.state;
-    return c.status || null;
+  // кнопки вида data-api="POST /api/..." (Источники)
+  function initApiButtons() {
+    $$('[data-api]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var conf = b.getAttribute('data-confirm');
+        if (conf && !window.confirm(conf)) return;
+        var parts = b.getAttribute('data-api').split(' ');
+        busy(b, true);
+        api(parts[0], parts[1], parts[0] === 'POST' ? {} : undefined)
+          .then(function (res) {
+            var msg = b.getAttribute('data-done') || 'Готово';
+            if (res && typeof res.new_messages === 'number') msg += ': новых сообщений ' + res.new_messages;
+            reloadWith(msg);
+          })
+          .catch(function (e) { busy(b, false); toast(e.message, true); });
+      });
+    });
   }
-  function uniqHTML(u) {
-    if (u == null) return "";
-    var p = Math.round(u * 100);
-    return '<span class="uniq"><span class="uniq__bar"><i class="' + (u < 0.5 ? "low" : "") + '" style="width:' + p + '%"></i></span>уникальность <b>' + p + "%</b></span>";
-  }
-  function sourceHTML(s) {
-    if (!s) return '<div class="src-detail muted">Источник не найден</div>';
-    var b = '<span class="badge badge--kind-' + esc(s.kind) + '">' + esc(s.kind_label) + "</span>";
-    if (s.is_primary) b += ' <span class="badge badge--primary-src">первоисточник</span>';
-    if (s.duplicates > 0) b += ' <span class="badge badge--dup">дубль ×' + s.duplicates + "</span>";
-    if (s.is_important) b += ' <span class="badge badge--important">важное</span>';
-    var meta = [];
-    if (s.published && s.published !== "—") meta.push(esc(s.published));
-    if (s.chat) meta.push(esc(s.chat) + (s.author ? " · " + esc(s.author) : ""));
-    if (s.iteration) meta.push("итерация " + s.iteration + (s.query ? " · «" + esc(s.query) + "»" : ""));
-    var link = s.url ? '<a href="' + esc(s.url) + '" target="_blank" rel="noopener noreferrer">Открыть источник ↗</a>'
-      : (s.raw_url ? '<span class="mono small muted">' + esc(s.raw_url) + "</span>" : "");
-    return '<div class="src-detail">' +
-      '<div class="src__badges"><b>[' + s.n + "]</b> " + b + " " + uniqHTML(s.uniqueness) + "</div>" +
-      '<div class="src__title">' + esc(s.title) + "</div>" +
-      (s.snippet ? '<div class="src__snippet">' + esc(s.snippet) + "</div>" : "") +
-      '<div class="src__meta">' + meta.join(" · ") + "</div>" +
-      '<div class="row" style="margin-top:8px">' + link +
-      (document.getElementById("src-" + s.id) ? ' <button type="button" class="btn btn--xs" data-show-in-list="' + s.id + '">Показать в списке источников</button>' : "") +
-      "</div></div>";
-  }
-  function openDrawer(title, html) {
-    $("#drawer-title").textContent = title;
-    $("#drawer-body").innerHTML = html;
-    document.body.classList.add("drawer-open");
-    $("#drawer").setAttribute("aria-hidden", "false");
-  }
-  function closeDrawer() {
-    document.body.classList.remove("drawer-open");
-    var d = $("#drawer"); if (d) d.setAttribute("aria-hidden", "true");
-  }
-  function openClaim(claim) {
-    var st = claimState(claim);
-    var ids = claim.source_ids || [];
-    var html = '<div class="drawer__claim"><div class="small muted" style="margin-bottom:4px">Утверждение</div>' + esc(claim.text) +
-      '<div style="margin-top:8px">' + (st && STATE_LABEL[st] ? '<span class="fact fact--' + st + '">' + STATE_LABEL[st] + "</span>" : '<span class="fact fact--none">не проверен</span>') + "</div></div>";
-    if (!ids.length) html += '<div class="flash flash--err">У этого утверждения нет ссылки на источник — проверьте его вручную или уберите из текста.</div>';
-    html += '<div class="section-title">Источники (' + ids.length + ")</div>";
-    ids.forEach(function (id) { html += sourceHTML(SOURCES[String(id)]); });
-    openDrawer("Откуда это известно", html);
-    $$("[data-claim-card]").forEach(function (c) { c.classList.toggle("is-active", c.getAttribute("data-claim-card") === String(claim.id)); });
-  }
-  document.addEventListener("click", function (e) {
-    var fn = e.target.closest("[data-src]");
-    if (fn) {
-      e.preventDefault();
-      var s = SOURCES[String(fn.getAttribute("data-src"))];
-      openDrawer(s ? "Источник [" + s.n + "]" : "Источник", sourceHTML(s));
-      return;
-    }
-    var show = e.target.closest("[data-show-in-list]");
-    if (show) {
-      closeDrawer();
-      var el = document.getElementById("src-" + show.getAttribute("data-show-in-list"));
-      if (el) {
-        activateTab("sources");
-        var det = el.closest("details"); if (det) det.open = true;
-        setTimeout(function () { flash(el); }, 80);
-      }
-      return;
-    }
-    if (e.target.closest("[data-drawer-close]")) { closeDrawer(); return; }
-    var cl = e.target.closest("[data-claim]");
-    if (cl) { var c = findClaim(cl.getAttribute("data-claim")); if (c) openClaim(c); return; }
-    var cc = e.target.closest("[data-claim-card]");
-    if (cc && !e.target.closest("form") && !e.target.closest("button")) {
-      var c2 = findClaim(cc.getAttribute("data-claim-card"));
-      if (c2) {
-        openClaim(c2);
-        var mark = $('[data-claim="' + c2.id + '"]');
-        if (mark) mark.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  // ================================================================ РАДАР
+  function initRadar() {
+    var data = readJSON('radar-data');
+    var list = $('[data-feed]');
+    if (!data || !list) return;
+
+    var scroller = $('[data-feed-scroll]');
+    var newBtn = $('[data-feed-new]');
+    var onair = $('#onair');
+    var seen = {};
+    var byKeyTimes = {};       // emerging_key -> [Date] для «пульса» сюжета
+    var cursor = (data.feed && data.feed.cursor) || 0;
+    var filter = 'all';
+    var unseenAbove = 0;
+    var MAX_ITEMS = 250;
+    var emerging = data.emerging || [];
+
+    function msgMatches(li) {
+      switch (filter) {
+        case 'unique': return li.dataset.unique === '1';
+        case 'important': return li.dataset.important === '1';
+        case 'phone': return li.dataset.phone === '1';
+        case 'max': case 'telegram': return li.dataset.platform === filter;
+        default: return true;
       }
     }
-  });
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") closeDrawer();
-    if (e.key === "Enter" && e.target.matches && e.target.matches("[data-claim-card]")) e.target.click();
-  });
-  function findClaim(id) {
-    for (var i = 0; i < CLAIMS.length; i++) if (String(CLAIMS[i].id) === String(id)) return CLAIMS[i];
-    return null;
+    function updateCount() {
+      var all = $$('.msg', list);
+      var shown = all.filter(function (li) { return !li.hidden; }).length;
+      var c = $('[data-feed-count]');
+      if (c) c.textContent = (filter === 'all' ? all.length : shown + ' из ' + all.length);
+      $('[data-feed-empty]').hidden = all.length > 0;
+    }
+
+    function renderMsg(m, arriving) {
+      var b = m.badges || {};
+      var li = document.createElement('li');
+      // маркер (жёлтая полоса и заливка) — только для уникального И важного; просто уникальное — тихий бейдж
+      li.className = 'msg' + (b.unique && b.important ? ' is-unique' : '') + (b.is_duplicate ? ' is-dup' : '') + (arriving ? ' is-arriving' : '');
+      li.dataset.id = m.id;
+      li.dataset.platform = m.platform || 'max';
+      li.dataset.unique = b.unique ? '1' : '0';
+      li.dataset.important = b.important ? '1' : '0';
+      li.dataset.phone = b.has_phone ? '1' : '0';
+      var badges = '';
+      if (b.unique) badges += '<span class="badge ' + (b.important ? 'badge--unique' : 'badge--soft') + '" title="Первое сообщение, не перепечатка">уникальное</span>';
+      if (b.important) badges += '<span class="badge badge--important">важное</span>';
+      if (b.duplicates) badges += '<span class="badge badge--dup" title="Столько раз сообщение перепечатали в других чатах">дубль ×' + b.duplicates + '</span>';
+      if (b.is_duplicate) badges += '<span class="badge badge--dup" title="Перепечатка более раннего сообщения">копия</span>';
+      if (b.has_phone) badges += '<span class="badge badge--phone">' + ICON.phone + 'есть телефон</span>';
+      if (m.has_media) badges += '<span class="msg__media">' + ICON.image + 'фото</span>';
+      if (m.is_forwarded) badges += '<span class="msg__media">' + ICON.fwd + 'переслано</span>';
+      li.innerHTML =
+        '<time class="msg__time" datetime="' + esc(m.sent_at) + '">' + hhmm(m.sent_at) + '</time>' +
+        '<div>' +
+          '<div class="msg__head">' + pfHTML(m.platform, true) +
+            '<span class="plate" title="' + esc(m.chat_title) + (m.district ? ', ' + esc(m.district) : '') + '">' + esc(m.chat_title || 'Чат') + '</span>' +
+            '<span class="msg__author">' + esc(m.author_name || 'Аноним') + '</span>' +
+          '</div>' +
+          '<p class="msg__text">' + esc(m.text) + '</p>' +
+          (badges ? '<div class="msg__badges">' + badges + '</div>' : '') +
+        '</div>';
+      li.hidden = !msgMatches(li);
+      if (arriving) setTimeout(function () { li.classList.remove('is-arriving'); }, 3000);
+      return li;
+    }
+
+    function remember(m) {
+      if (m.emerging_key) {
+        var d = parseISO(m.sent_at);
+        if (d) (byKeyTimes[m.emerging_key] = byKeyTimes[m.emerging_key] || []).push(d);
+      }
+    }
+
+    function addMessages(items, live) {
+      if (!items || !items.length) return;
+      var fresh = items.filter(function (m) { return m && !seen[m.id]; });
+      if (!fresh.length) return;
+      var ts = function (m) { var d = parseISO(m.sent_at); return d ? d.getTime() : 0; };
+      fresh.sort(function (a, b) { return ts(a) - ts(b) || a.id - b.id; });
+      var atTop = !scroller || scroller.scrollTop < 40;
+      var before = scroller ? scroller.scrollHeight : 0;
+      fresh.forEach(function (m) {
+        seen[m.id] = true;
+        if (m.id > cursor) cursor = m.id;
+        remember(m);
+        var li = renderMsg(m, live);
+        li.dataset.ts = ts(m);
+        // лента по времени отправки: новое — сверху
+        var after = null;
+        for (var k = list.firstChild; k; k = k.nextSibling) {
+          if (+k.dataset.ts <= +li.dataset.ts) { after = k; break; }
+        }
+        list.insertBefore(li, after);
+        if (live && !li.hidden && !atTop) unseenAbove++;
+      });
+      var all = $$('.msg', list);
+      for (var i = MAX_ITEMS; i < all.length; i++) { all[i].remove(); }
+      if (live && scroller && !atTop) {
+        scroller.scrollTop += scroller.scrollHeight - before;   // не сдвигаем то, что редактор читает
+      }
+      if (newBtn) {
+        newBtn.textContent = unseenAbove + ' ' + plural(unseenAbove, 'новое сообщение', 'новых сообщения', 'новых сообщений') + ', показать';
+        newBtn.classList.toggle('is-on', unseenAbove > 0);
+      }
+      updateCount();
+    }
+    if (newBtn) newBtn.addEventListener('click', function () {
+      unseenAbove = 0; newBtn.classList.remove('is-on');
+      scroller.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    if (scroller) scroller.addEventListener('scroll', function () {
+      if (scroller.scrollTop < 40 && unseenAbove) { unseenAbove = 0; newBtn.classList.remove('is-on'); }
+    }, { passive: true });
+
+    $$('[data-filter]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        filter = b.getAttribute('data-filter');
+        $$('[data-filter]').forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+        $$('.msg', list).forEach(function (li) { li.hidden = !msgMatches(li); });
+        updateCount();
+      });
+    });
+
+    // ---------------------------------------------------- возникающие сюжеты
+    var sigList = $('[data-signals]');
+    function pulseHTML(e) {
+      var times = (byKeyTimes[e.key] || []).slice();
+      if (times.length < 2 && e.sample) e.sample.forEach(function (m) { var d = parseISO(m.sent_at); if (d) times.push(d); });
+      var first = parseISO(e.first_at), last = parseISO(e.last_at);
+      if (!first || !last) return '';
+      var bins = 16, span = Math.max(last - first, 60000), counts = [];
+      for (var i = 0; i < bins; i++) counts.push(0);
+      times.forEach(function (t) {
+        var k = Math.min(bins - 1, Math.max(0, Math.floor((t - first) / span * bins)));
+        counts[k]++;
+      });
+      var max = Math.max.apply(null, counts.concat([1]));
+      var recentFrom = Math.floor(bins * 0.75);
+      var bars = counts.map(function (c, i) {
+        var h = c ? Math.max(18, Math.round(c / max * 100)) : 6;
+        return '<i style="height:' + h + '%"' + (c && i >= recentFrom && e.trend === 'rising' ? ' class="is-recent"' : '') + '></i>';
+      }).join('');
+      return '<div class="pulse" aria-hidden="true">' + bars + '</div>' +
+        '<div class="pulse__axis"><span>' + hhmm(e.first_at) + '</span><span>' + hhmm(e.last_at) + '</span></div>';
+    }
+    var lastSig = null;
+    function renderSignals(items) {
+      var sig = JSON.stringify(items || []);
+      if (sig === lastSig) return;          // не перерисовываем то же самое: кнопки не «уплывают» из-под курсора
+      lastSig = sig;
+      emerging = items || [];
+      $$('[data-signal-count]').forEach(function (c) { c.textContent = emerging.length; });
+      $('[data-signals-empty]').hidden = emerging.length > 0;
+      sigList.innerHTML = emerging.map(function (e) {
+        var chats = (e.chats || []).slice(0, 4).map(function (c) { return '<span class="plate">' + esc(c) + '</span>'; }).join('');
+        if ((e.chats || []).length > 4) chats += '<span class="muted" style="font-size:13px">и ещё ' + (e.chats.length - 4) + '</span>';
+        var pfs = (e.platforms || []).map(function (p) { return pfHTML(p, false); }).join('');
+        var grow = e.trend === 'rising'
+          ? '<span class="signal__grow">' + ICON.grow + ' ' + esc(e.trend_label || 'растёт') + (e.recent_count ? ', +' + e.recent_count + ' за последние минуты' : '') + '</span>'
+          : '<span class="muted">' + esc(e.trend_label || '') + '</span>';
+        var actions = e.investigation_id
+          ? '<a class="btn btn--sm" href="/stories/' + e.investigation_id + '">Открыть сюжет</a> ' + (e.investigation_status ? statusHTML(e.investigation_status) : '')
+          : '<button class="btn btn--primary btn--sm" type="button" data-investigate="' + esc(e.key) + '">' + ICON.search + 'Исследовать</button>' +
+            '<button class="btn btn--quiet btn--sm" type="button" data-dismiss="' + esc(e.key) + '">Скрыть</button>';
+        return '<li class="signal' + (e.trend === 'rising' ? ' is-hot' : '') + '" data-key="' + esc(e.key) + '">' +
+          '<div class="signal__title">' + esc(e.title) + '</div>' +
+          '<div class="signal__facts">' +
+            '<span><b>' + e.messages_count + '</b> ' + plural(e.messages_count, 'сообщение', 'сообщения', 'сообщений') + '</span>' +
+            '<span>из <b>' + e.chats_count + '</b> ' + plural(e.chats_count, 'чата', 'чатов', 'чатов') + '</span>' +
+            '<span>первое в <b>' + hhmm(e.first_at) + '</b></span>' + grow +
+          '</div>' +
+          pulseHTML(e) +
+          '<div class="signal__facts" style="margin-top:6px">' +
+            (e.unique_count ? '<span><b>' + e.unique_count + '</b> уникальных</span>' : '') +
+            (e.important_count ? '<span><b>' + e.important_count + '</b> важных</span>' : '') +
+            (e.has_phone_count ? '<span><b>' + e.has_phone_count + '</b> с телефоном</span>' : '') +
+          '</div>' +
+          '<div class="signal__plates">' + pfs + chats + '</div>' +
+          (e.summary ? '<p class="signal__quote">' + esc(e.summary) + '</p>' : '') +
+          '<div class="btn-row">' + actions + '</div>' +
+        '</li>';
+      }).join('');
+    }
+    sigList.addEventListener('click', function (ev) {
+      var inv = ev.target.closest('[data-investigate]');
+      var dis = ev.target.closest('[data-dismiss]');
+      if (inv) {
+        busy(inv, true);
+        inv.lastChild.textContent = 'Запускаем поиск…';
+        api('POST', '/api/emerging/' + encodeURIComponent(inv.getAttribute('data-investigate')) + '/investigate', {})
+          .then(function (s) { goWith('/stories/' + s.id, 'AI начал поиск по сюжету'); })
+          .catch(function (e) { busy(inv, false); inv.lastChild.textContent = 'Исследовать'; toast(e.message, true); });
+      } else if (dis) {
+        var key = dis.getAttribute('data-dismiss');
+        api('POST', '/api/emerging/' + encodeURIComponent(key) + '/dismiss', {})
+          .then(function () { renderSignals(emerging.filter(function (e) { return e.key !== key; })); toast('Карточка скрыта'); })
+          .catch(function (e) { toast(e.message, true); });
+      }
+    });
+
+    // ---------------------------------------------------- сюжеты в работе
+    function updateStory(s) {
+      var li = $('[data-inwork] [data-story="' + s.id + '"]');
+      if (!li) return;
+      var st = $('.status', li);
+      if (st) st.outerHTML = statusHTML(s.status, s.status_label);
+      var bar = $('.bar i', li);
+      var pct = s.progress && s.progress.percent;
+      if (s.status === 'researching') {
+        if (!bar) { $('a', li).insertAdjacentHTML('beforeend', '<div class="bar"><i style="width:3%"></i></div>'); bar = $('.bar i', li); }
+        if (pct != null) bar.style.width = Math.max(3, pct) + '%';
+      } else if (bar) { bar.parentNode.remove(); }
+    }
+
+    // ---------------------------------------------------- живой поток: SSE, запасной вариант — опрос
+    function setLive(on) { if (onair) onair.classList.toggle('is-off', !on); }
+    var pollTimer = null;
+    function poll() {
+      Promise.all([
+        api('GET', '/api/feed?since=' + cursor + '&limit=100'),
+        api('GET', '/api/emerging')
+      ]).then(function (r) {
+        setLive(true);
+        addMessages(r[0] && r[0].items, true);
+        if (r[0] && r[0].cursor > cursor) cursor = r[0].cursor;
+        renderSignals(r[1]);
+      }).catch(function () { setLive(false); });
+    }
+    function startPolling() {
+      if (pollTimer) return;
+      poll();
+      pollTimer = setInterval(poll, 4000);
+    }
+    function startStream() {
+      if (!window.EventSource) { startPolling(); return; }
+      var errors = 0;
+      var es = new EventSource('/api/stream?since=' + cursor);
+      es.addEventListener('hello', function () { errors = 0; setLive(true); });
+      es.addEventListener('new_message', function (e) {
+        errors = 0;
+        try { addMessages([JSON.parse(e.data)], true); } catch (x) { /* битое событие пропускаем */ }
+      });
+      es.addEventListener('emerging_update', function (e) {
+        try { renderSignals(JSON.parse(e.data).items); } catch (x) { /* пропуск */ }
+      });
+      es.addEventListener('story_update', function (e) {
+        try { updateStory(JSON.parse(e.data)); } catch (x) { /* пропуск */ }
+      });
+      es.onerror = function () {
+        errors++;
+        setLive(false);
+        if (es.readyState === 2 || errors >= 3) { es.close(); startPolling(); }
+      };
+    }
+
+    // начальная отрисовка: старые сообщения без анимации
+    addMessages((data.feed && data.feed.items) || [], false);
+    renderSignals(emerging);
+    startStream();
+
+    // «Своя зацепка»
+    var form = $('[data-lead-form]');
+    var ex = $('[data-fill-example]');
+    if (ex) ex.addEventListener('click', function () { var t = $('#lead'); t.value = data.demo_lead || ''; t.focus(); });
+    if (form) form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var lead = form.lead_text.value.trim();
+      if (lead.length < 3) { toast('Опишите зацепку хотя бы парой слов', true); return; }
+      var btn = $('[type=submit]', form);
+      busy(btn, true);
+      var body = { lead_text: lead, autorun: true };
+      if (form.channel_id && form.channel_id.value) body.channel_id = parseInt(form.channel_id.value, 10);
+      api('POST', '/api/stories', body)
+        .then(function (s) { goWith('/stories/' + s.id, 'AI начал поиск по зацепке'); })
+        .catch(function (e) { busy(btn, false); toast(e.message, true); });
+    });
   }
 
-  /* ------------------------------------------------------------ подсветка утверждений в тексте */
-  function highlightClaims(el, text) {
-    if (text == null) text = el.textContent;
-    var ranges = [];
-    CLAIMS.forEach(function (c) {
-      if (!c.text) return;
-      var i = text.indexOf(c.text);
-      if (i >= 0) ranges.push({ start: i, end: i + c.text.length, claim: c });
-    });
-    ranges.sort(function (a, b) { return a.start - b.start || b.end - a.end; });
-    var frag = document.createDocumentFragment(), pos = 0, found = {};
-    ranges.forEach(function (r) {
-      if (r.start < pos) return; // перекрытие — пропускаем
-      frag.appendChild(document.createTextNode(text.slice(pos, r.start)));
-      var span = document.createElement("span");
-      var st = claimState(r.claim);
-      span.className = "claim claim--" + (STATE_LABEL[st] ? st : "none");
-      span.setAttribute("data-claim", r.claim.id);
-      span.setAttribute("title", (STATE_LABEL[st] || "не проверено") + " — нажмите, чтобы увидеть источник");
-      span.textContent = text.slice(r.start, r.end);
-      frag.appendChild(span);
-      found[String(r.claim.id)] = true;
-      pos = r.end;
-    });
-    frag.appendChild(document.createTextNode(text.slice(pos)));
-    el.innerHTML = "";
-    el.appendChild(frag);
-    return found;
+  // ================================================================ СЮЖЕТ
+  var TOKEN_RE = /\s+|[^\s]+/g;
+  function wordDiff(a, b) {
+    var ta = (a || '').match(TOKEN_RE) || [], tb = (b || '').match(TOKEN_RE) || [];
+    var n = ta.length, m = tb.length;
+    if (n * m > 3e6) return { ops: [['del', a], ['ins', b]], ratio: 0, changed: 1 };
+    var dp = new Array(n + 1);
+    for (var i = 0; i <= n; i++) { dp[i] = new Uint16Array(m + 1); }
+    for (i = n - 1; i >= 0; i--) {
+      for (var j = m - 1; j >= 0; j--) {
+        dp[i][j] = ta[i] === tb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    var ops = [], ii = 0, jj = 0, same = 0, changedWords = 0;
+    function push(op, s) {
+      if (ops.length && ops[ops.length - 1][0] === op) ops[ops.length - 1][1] += s; else ops.push([op, s]);
+      if (op !== 'eq' && /\S/.test(s)) changedWords++;
+    }
+    while (ii < n && jj < m) {
+      if (ta[ii] === tb[jj]) { push('eq', ta[ii]); same++; ii++; jj++; }
+      else if (dp[ii + 1][jj] >= dp[ii][jj + 1]) { push('del', ta[ii++]); }
+      else { push('ins', tb[jj++]); }
+    }
+    while (ii < n) push('del', ta[ii++]);
+    while (jj < m) push('ins', tb[jj++]);
+    return { ops: ops, ratio: (n + m) ? (2 * same) / (n + m) : 1, changed: changedWords };
   }
-  $$("[data-highlight-claims]").forEach(function (el) { if (el.id !== "check-view") highlightClaims(el); });
 
-  /* ------------------------------------------------------------ отметки фактов без перезагрузки */
-  document.addEventListener("submit", function (e) {
-    var f = e.target;
-    if (f.matches("[data-ajax-fact]")) {
-      e.preventDefault();
-      var fd = new FormData(f);
-      fetch(f.action, { method: "POST", body: fd, headers: { Accept: "application/json" }, credentials: "same-origin" })
-        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-        .then(function (data) {
-          var holder = f.closest(".ritem, .claim-card");
-          if (holder) {
-            var badge = $("[data-fact-badge]", holder);
-            if (badge) {
-              badge.className = "fact fact--" + data.state;
-              badge.innerHTML = esc(data.label) + ' <span class="by">· человек</span>';
-            }
-            $$(".mark-btn", holder).forEach(function (b) {
-              var st = b.closest("form").querySelector('[name="state"]').value;
-              b.classList.toggle("is-on", st === data.state);
+  function initStory() {
+    var data = readJSON('story-data');
+    if (!data) return;
+    var base = '/api/stories/' + data.id;
+
+    // ---------------------------------------------------- вкладки
+    function openTab(name) {
+      $$('[data-tab]').forEach(function (t) {
+        var on = t.getAttribute('data-tab') === name;
+        t.setAttribute('aria-selected', String(on));
+        var p = document.getElementById('panel-' + t.getAttribute('data-tab'));
+        if (p) p.hidden = !on;
+      });
+    }
+    $$('[data-tab]').forEach(function (t) {
+      t.addEventListener('click', function () {
+        var name = t.getAttribute('data-tab');
+        openTab(name);
+        try { history.replaceState(null, '', name === 'report' ? location.pathname : '#' + name); } catch (e) { /* ок */ }
+      });
+    });
+    var h = location.hash.replace('#', '');
+    if (h === 'draft' || h === 'history') openTab(h);
+
+    // ---------------------------------------------------- действия по статусу
+    $$('[data-act]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var act = b.getAttribute('data-act');
+        busy(b, true);
+        api('POST', base + '/' + act, {})
+          .then(function () { reloadWith({ run: 'AI начал поиск', stop: 'Поиск остановлен', reopen: 'Сюжет снова в работе' }[act] || 'Готово'); })
+          .catch(function (e) { busy(b, false); toast(e.message, true); });
+      });
+    });
+    var deeper = $('[data-deeper-form]');
+    if (deeper) deeper.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var btn = $('[type=submit]', deeper); busy(btn, true);
+      api('POST', base + '/deeper', { question: deeper.question.value.trim() })
+        .then(function () { reloadWith('AI копает глубже: ещё один круг поиска'); })
+        .catch(function (e) { busy(btn, false); toast(e.message, true); });
+    });
+    var reject = $('[data-reject-form]');
+    if (reject) reject.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var btn = $('[type=submit]', reject); busy(btn, true);
+      api('POST', base + '/reject', { comment: reject.comment.value.trim() || null })
+        .then(function () { reloadWith('Сюжет отмечен: не подтвердилось'); })
+        .catch(function (e) { busy(btn, false); toast(e.message, true); });
+    });
+
+    // ---------------------------------------------------- передать дальше
+    var hdlg = document.getElementById('dlg-handoff');
+    var hform = $('[data-handoff-form]');
+    if (hdlg && hform) {
+      hdlg.addEventListener('nf-open', function () {
+        var box = $('[data-handoff-check]', hdlg);
+        box.className = 'warnbox'; box.textContent = 'Проверяем факты…';
+        api('GET', base + '/handoff/check').then(function (c) {
+          var un = (c && c.unconfirmed) || [];
+          if (!un.length) {
+            box.className = 'warnbox is-clean';
+            box.textContent = 'Все утверждения справки и черновика подтверждены.';
+            return;
+          }
+          var lbl = { unconfirmed: 'не подтверждено', 'false': 'ложь' };
+          box.innerHTML = '<b>' + un.length + ' ' + plural(un.length, 'утверждение не подтверждено', 'утверждения не подтверждены', 'утверждений не подтверждены') +
+            '.</b> Передать можно, но получатель должен об этом знать — напишите в комментарии.' +
+            '<ul>' + un.slice(0, 6).map(function (u) { return '<li>' + esc(u.text) + ' <span class="muted">(' + (lbl[u.state] || 'не проверено') + ')</span></li>'; }).join('') +
+            (un.length > 6 ? '<li class="muted">и ещё ' + (un.length - 6) + '</li>' : '') + '</ul>' +
+            ((c.warnings || []).filter(function (w) { return !/не подтвержд/.test(w); }).map(function (w) { return '<div>' + esc(w) + '</div>'; }).join(''));
+        }).catch(function (e) { box.textContent = 'Не удалось проверить факты: ' + e.message; });
+      });
+      hform.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var to = hform.to.value.trim();
+        if (!to) { toast('Укажите, кому передаёте', true); hform.to.focus(); return; }
+        var chEl = $('input[name=channel]:checked', hform);
+        var btn = $('[data-handoff-submit]', hform); busy(btn, true);
+        api('POST', base + '/handoff', { to: to, channel: chEl ? chEl.value : 'other', comment: hform.comment.value.trim() || null })
+          .then(function () { reloadWith('Передано дальше: ' + to); })
+          .catch(function (e) { busy(btn, false); toast(e.message, true); });
+      });
+    }
+
+    // ---------------------------------------------------- переход к источнику
+    function revealSource(id) {
+      var el = document.getElementById('src-' + id);
+      if (!el) { toast('Источник не найден на странице', true); return; }
+      if (window.matchMedia('(max-width: 860px)').matches) showColumn('col-side');
+      var det = el.closest('details'); if (det) det.open = true;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.remove('is-flash'); void el.offsetWidth; el.classList.add('is-flash');
+    }
+    document.addEventListener('click', function (ev) {
+      var r = ev.target.closest('[data-src]');
+      if (r) { ev.preventDefault(); revealSource(r.getAttribute('data-src')); }
+    });
+
+    // ---------------------------------------------------- отметки фактов
+    function recount() {
+      var t = { confirmed: 0, open: 0, 'false': 0 };
+      $$('[data-fact]').forEach(function (li) {
+        var s = li.dataset.state;
+        t[s === 'confirmed' ? 'confirmed' : s === 'false' ? 'false' : 'open']++;
+      });
+      Object.keys(t).forEach(function (k) { var el = $('[data-tally="' + k + '"]'); if (el) el.textContent = t[k]; });
+    }
+    $$('[data-fact]').forEach(function (li) {
+      $$('.mark button', li).forEach(function (b) {
+        b.addEventListener('click', function () {
+          var state = b.dataset.state, prev = li.dataset.state;
+          li.dataset.state = state;
+          $$('.mark button', li).forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+          recount();
+          var text = li.dataset.text || $('.fact__text', li).textContent.replace(/\s+/g, ' ').trim();
+          api('POST', base + '/facts', { fact_text: text, state: state, claim_id: li.dataset.fact })
+            .then(function () {
+              data.claims.forEach(function (c) { if (String(c.id) === li.dataset.fact) c.state = state; });
+              renderDraft();
+            })
+            .catch(function (e) {
+              li.dataset.state = prev;
+              $$('.mark button', li).forEach(function (x) { x.setAttribute('aria-pressed', String(x.dataset.state === prev)); });
+              recount(); toast(e.message, true);
             });
-            if (holder.classList.contains("claim-card")) {
-              holder.className = holder.className.replace(/claim-card--\w+/, "claim-card--" + data.state);
-            }
-          }
-          var c = findClaim(data.claim_id);
-          if (c) {
-            c.state = data.state;
-            $$('[data-claim="' + data.claim_id + '"]').forEach(function (s) { s.className = "claim claim--" + data.state; });
-          }
-          toast("Отмечено: " + data.label);
-        })
-        .catch(function () { f.submit(); });
-      return;
-    }
-    // комментарий к переходу
-    if (f.matches("[data-ask-comment]") && !f.dataset.asked) {
-      var answer = window.prompt(f.getAttribute("data-ask-comment"), "");
-      if (answer === null) { e.preventDefault(); return; }
-      var inp = f.querySelector('[name="comment"]'); if (inp) inp.value = answer;
-    }
-    if (f.matches("[data-guard-dirty]") && window.NF_DIRTY && window.NF_DIRTY()) {
-      if (!window.confirm("Есть несохранённые правки. Перейти без сохранения? (Отмена — вернуться и нажать «Сохранить правку»)")) {
-        e.preventDefault(); return;
-      }
-      window.NF_SKIP_UNLOAD = true;
-    }
-    if (f.matches("[data-busy]")) {
-      var btn = f.querySelector("button[type=submit]");
-      if (btn) { btn.disabled = true; btn.textContent = f.getAttribute("data-busy"); }
-    }
-  });
+        });
+      });
+    });
 
-  /* ------------------------------------------------------------ фильтр источников */
-  var filt = $("[data-src-filter]");
-  if (filt) {
-    filt.addEventListener("click", function (e) {
-      var chip = e.target.closest(".chip");
-      if (!chip) return;
-      $$(".chip", filt).forEach(function (c) { c.classList.toggle("is-active", c === chip); });
-      var k = chip.getAttribute("data-kind");
-      $$(".src-group").forEach(function (g) {
-        var kinds = (g.getAttribute("data-kinds") || "").split(" ");
-        g.classList.toggle("hidden", !!k && kinds.indexOf(k) < 0);
+    // ---------------------------------------------------- черновик
+    var readEl = $('[data-draft-read]');
+    var diffEl = $('[data-diff]');
+    var statEl = $('[data-diff-stat]');
+    var claimsEl = $('[data-claims]');
+    var dform = $('[data-draft-form]');
+    var cur = data.current;
+    var mode = 'read';
+
+    function srcButtons(ids) {
+      return (ids || []).map(function (sid) {
+        var s = data.sources[sid] || data.sources[String(sid)];
+        return s ? '<button type="button" class="src-ref" data-src="' + sid + '" title="' + esc(s.title) + '">' + s.n + '</button>' : '';
+      }).join('');
+    }
+    function liveBody() { return dform && mode === 'edit' ? dform.body.value : (cur ? cur.body : ''); }
+    function liveTitle() { return dform && mode === 'edit' ? dform.title.value : (cur ? cur.title : ''); }
+
+    function highlighted(body) {
+      var spans = [];
+      (data.claims || []).forEach(function (c, idx) {
+        if (!c.text) return;
+        var at = body.indexOf(c.text);
+        if (at >= 0) spans.push({ s: at, e: at + c.text.length, c: c, idx: idx });
+      });
+      spans.sort(function (a, b) { return a.s - b.s; });
+      var out = '', pos = 0;
+      spans.forEach(function (sp) {
+        if (sp.s < pos) return;
+        var cls = sp.c.state === 'confirmed' ? 'hl hl--confirmed' : sp.c.state === 'false' ? 'hl hl--false' : 'hl';
+        var first = (sp.c.source_ids || [])[0];
+        out += esc(body.slice(pos, sp.s)) + '<span class="' + cls + '"' + (first != null ? ' data-src="' + first + '"' : '') +
+          ' title="' + (sp.c.state === 'confirmed' ? 'подтверждено' : sp.c.state === 'false' ? 'ложь' : 'не подтверждено') + ', открыть источник">' +
+          esc(body.slice(sp.s, sp.e)) + '</span>';
+        pos = sp.e;
+      });
+      return out + esc(body.slice(pos));
+    }
+    function renderClaims() {
+      if (!claimsEl) return;
+      var body = liveBody();
+      var lbl = { confirmed: 'подтверждено', unconfirmed: 'не подтверждено', 'false': 'ложь' };
+      claimsEl.innerHTML = (data.claims || []).map(function (c) {
+        var missing = c.text && body.indexOf(c.text) < 0;
+        return '<li class="claim' + (missing ? ' is-missing' : '') + '" data-state="' + esc(c.state || '') + '">' +
+          '<span class="claim__dot"></span>' +
+          '<span class="claim__text">' + (missing ? 'изменено вами: ' : '') + esc(c.text) + ' <span class="fact__src">' + srcButtons(c.source_ids) + '</span></span>' +
+          '<span class="muted" style="font-size:13px;white-space:nowrap">' + (lbl[c.state] || 'не проверено') + '</span></li>';
+      }).join('');
+    }
+    function renderDiffStat() {
+      if (!statEl || !data.ai) return;
+      var d = wordDiff(data.ai.body, liveBody());
+      statEl.textContent = d.changed
+        ? 'изменено ' + d.changed + ' ' + plural(d.changed, 'слово', 'слова', 'слов') + ', совпадение с AI ' + Math.round(d.ratio * 100) + '%'
+        : 'совпадает с текстом AI';
+      return d;
+    }
+    function renderDraft() {
+      if (!cur) return;
+      if (readEl) readEl.innerHTML = '<h4>' + esc(liveTitle()) + '</h4>' + highlighted(liveBody());
+      var d = renderDiffStat();
+      if (diffEl && d) {
+        diffEl.innerHTML = d.ops.map(function (o) {
+          return o[0] === 'eq' ? esc(o[1]) : o[0] === 'ins' ? '<ins>' + esc(o[1]) + '</ins>' : '<del>' + esc(o[1]) + '</del>';
+        }).join('');
+      }
+      renderClaims();
+    }
+    function setMode(m) {
+      mode = m;
+      $$('[data-mode]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-mode') === m)); });
+      $$('[data-view]').forEach(function (v) { v.hidden = v.getAttribute('data-view') !== m; });
+      renderDraft();
+      if (m === 'edit' && dform) dform.body.focus();
+    }
+    $$('[data-mode]').forEach(function (b) { b.addEventListener('click', function () { setMode(b.getAttribute('data-mode')); }); });
+    if (dform) {
+      var tmr;
+      dform.addEventListener('input', function () { clearTimeout(tmr); tmr = setTimeout(function () { renderDiffStat(); renderClaims(); }, 250); });
+      $('[data-draft-reset]', dform).addEventListener('click', function () {
+        dform.title.value = cur.title; dform.body.value = cur.body; renderDraft();
+      });
+      dform.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var body = dform.body.value.replace(/\r\n/g, '\n');
+        if (!body.trim()) { toast('Текст не может быть пустым', true); return; }
+        if (body === cur.body && dform.title.value === cur.title) { toast('Изменений нет'); return; }
+        var btn = $('[type=submit]', dform); busy(btn, true);
+        api('POST', base + '/drafts', { title: dform.title.value.trim() || cur.title, body: body })
+          .then(function (d) {
+            busy(btn, false);
+            cur = { version: d.version, title: d.title, body: d.body, author_kind: 'editor' };
+            var v = $('[data-version]');
+            if (v) v.innerHTML = 'Ваша правка v' + d.version + ', <span class="t">' + hhmm(d.created_at) + '</span>';
+            var tabCount = $('#tab-draft .count'); if (tabCount) tabCount.textContent = 'v' + d.version;
+            toast('Правка сохранена как версия v' + d.version);
+            setMode('diff');
+          })
+          .catch(function (e) { busy(btn, false); toast(e.message, true); });
+      });
+    }
+    renderDraft();
+
+    // ---------------------------------------------------- живой прогресс поиска
+    if (data.status === 'researching') {
+      var stagesEl = $('[data-stages]'), pctEl = $('[data-percent]'), barEl = $('[data-bar]');
+      var tick = function () {
+        api('GET', base + '/progress').then(function (p) {
+          var st = p.status && (p.status.value || p.status);
+          if (st && st !== 'researching') { reloadWith(st === 'review' ? 'Справка готова — проверьте факты' : 'Статус сюжета изменился'); return; }
+          var pr = p.progress || {};
+          if (pctEl) pctEl.textContent = (pr.percent || 0) + '%';
+          if (barEl) barEl.style.width = Math.max(3, pr.percent || 0) + '%';
+          if (stagesEl && pr.stages) {
+            stagesEl.innerHTML = pr.stages.map(function (s) {
+              return '<li class="stage is-' + esc(s.status) + '"><span class="stage__dot"></span><span>' + esc(s.title) + '</span><span class="stage__note">' + esc(s.note || '') + '</span></li>';
+            }).join('');
+          }
+          var its = p.iterations || [];
+          var chain = $('[data-chain]');
+          if (its.length && (!chain || chain.children.length !== its.length)) {
+            var html = '<ol class="chain" data-chain>' + its.map(function (it) {
+              return '<li><div class="chain__why">' + esc(it.rationale || 'Первые запросы по зацепке') + '</div><ul class="chain__q">' +
+                (it.queries_json || []).map(function (q) {
+                  return '<li><span><span class="agent">' + esc(q.agent) + '</span> ' + esc(q.query) + '</span><span class="n">' + (q.results || 0) + (q['new'] != null ? ' / ' + q['new'] : '') + '</span></li>';
+                }).join('') + '</ul></li>';
+            }).join('') + '</ol>';
+            if (chain) chain.outerHTML = html;
+            else stagesEl.insertAdjacentHTML('afterend', '<h3 style="font-size:15px;margin:6px 0 10px">Цепочка гипотез</h3>' + html);
+          }
+          var log = $('[data-log]');
+          if (log && pr.log) {
+            log.innerHTML = pr.log.slice(-40).map(function (l) {
+              return '<li class="is-' + esc(l.level) + '"><span class="t">' + hhmm(l.ts) + '</span><span>' + esc(l.message) + '</span></li>';
+            }).join('');
+            log.scrollTop = log.scrollHeight;
+          }
+          if (pr.state === 'error') { toast(pr.error || 'Поиск остановился с ошибкой', true); return; }
+          setTimeout(tick, 1500);
+        }).catch(function () { setTimeout(tick, 4000); });
+      };
+      setTimeout(tick, 800);
+    }
+  }
+
+  // ================================================================ ИСТОЧНИКИ
+  function initSources() {
+    var form = $('[data-add-source]');
+    if (form) form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var ref = form.ref.value.trim();
+      if (!ref) { toast('Укажите @username или ссылку t.me', true); return; }
+      var btn = $('[type=submit]', form); busy(btn, true);
+      var body = { platform: form.platform.value, ref: ref };
+      if (form.district.value.trim()) body.district = form.district.value.trim();
+      api('POST', '/api/sources', body)
+        .then(function (c) { reloadWith('Источник «' + (c && c.title || ref) + '» подключён'); })
+        .catch(function (e) { busy(btn, false); toast(e.message, true); });
+    });
+    $$('[data-toggle-chat]').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        var on = cb.checked;
+        api('PATCH', '/api/sources/chats/' + cb.getAttribute('data-toggle-chat'), { enabled: on })
+          .then(function (c) { toast((c && c.title ? '«' + c.title + '» ' : '') + (on ? 'слушаем' : 'больше не слушаем')); })
+          .catch(function (e) { cb.checked = !on; toast(e.message, true); });
       });
     });
   }
 
-  /* ------------------------------------------------------------ копирование, картинки */
-  document.addEventListener("click", function (e) {
-    var b = e.target.closest("[data-copy]");
-    if (!b) return;
-    var src = $(b.getAttribute("data-copy"));
-    if (!src) return;
-    var title = src.parentNode.querySelector("h2");
-    var text = (title ? title.textContent + "\n\n" : "") + src.textContent;
-    var done = function () { toast("Текст скопирован"); };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { toast("Не удалось скопировать", true); });
-    else toast("Буфер обмена недоступен", true);
+  // ================================================================ старт
+  document.addEventListener('DOMContentLoaded', function () {
+    initTheme();
+    initHints();
+    initSwitcher();
+    initDialogs();
+    initApiButtons();
+    initRadar();
+    initStory();
+    initSources();
+    var pending = null;
+    try { pending = sessionStorage.getItem('nf-toast'); sessionStorage.removeItem('nf-toast'); } catch (e) { pending = null; }
+    if (pending) toast(pending);
   });
-  $$("img[data-hide-on-error]").forEach(function (img) {
-    var hide = function () { img.style.display = "none"; };
-    img.addEventListener("error", hide);
-    if (img.complete && img.naturalWidth === 0) hide();
-  });
-
-  /* ------------------------------------------------------------ Channel DNA */
-  document.addEventListener("click", function (e) {
-    var b = e.target.closest("[data-rebuild-dna]");
-    if (!b) return;
-    b.disabled = true; b.textContent = "Считаем…";
-    fetch("/api/channels/" + b.getAttribute("data-rebuild-dna") + "/dna", { method: "POST", credentials: "same-origin" })
-      .then(function (r) {
-        if (r.status === 501) throw new Error("Пересчёт DNA ещё не реализован бэкендом");
-        if (!r.ok) throw new Error("Ошибка " + r.status);
-        toast("DNA пересчитан"); setTimeout(function () { location.reload(); }, 600);
-      })
-      .catch(function (err) { toast(err.message, true); b.disabled = false; b.textContent = "Пересчитать DNA"; });
-  });
-
-  /* ------------------------------------------------------------ новая зацепка */
-  var newForm = $("#new-form");
-  if (newForm) {
-    var demoBtn = $("#fill-demo");
-    if (demoBtn) demoBtn.addEventListener("click", function () {
-      var ta = $("#lead_text"), title = $("#title");
-      ta.value = "";
-      var text = newForm.getAttribute("data-demo-lead"), i = 0;
-      ta.focus();
-      var timer = setInterval(function () {
-        i += 6; ta.value = text.slice(0, i);
-        if (i >= text.length) { clearInterval(timer); ta.value = text; }
-      }, 12);
-      if (title && !title.value) title.value = newForm.getAttribute("data-demo-title");
-      var first = $('input[name="channel_id"]', newForm);
-      if (first && !$('input[name="channel_id"]:checked', newForm)) first.checked = true;
-    });
-    newForm.addEventListener("submit", function () {
-      var ov = $("#launch-overlay"); if (ov) ov.classList.add("is-on");
-    });
-    window.addEventListener("pageshow", function () { var ov = $("#launch-overlay"); if (ov) ov.classList.remove("is-on"); });
-  }
-
-  /* ------------------------------------------------------------ живой прогресс */
-  var root = $("#progress-root");
-  if (root && root.getAttribute("data-poll") === "1") {
-    var invId = root.getAttribute("data-inv");
-    var apiUrl = "/api/investigations/" + invId + "/progress";
-    var fallbackUrl = "/investigations/" + invId + "/progress.json";
-    var useFallback = false, failures = 0, finished = false, lastLogLen = -1, lastIterKey = "";
-    var AGENT = { web: "Web-поиск", max_chats: "Чаты MAX", max_chat: "Чаты MAX", official: "Официальные", media: "Медиа" };
-
-    var renderStages = function (stages) {
-      if (!stages || !stages.length) return;
-      $("#pg-stages").innerHTML = stages.map(function (s, i) {
-        return '<div class="stage is-' + esc(s.status || "pending") + '" data-stage="' + esc(s.key) + '"><span class="stage__icon"></span>' +
-          '<div class="stage__n">ЭТАП ' + (i + 1) + '</div><div class="stage__title">' + esc(s.title || s.key) + "</div>" +
-          '<div class="stage__note">' + esc(s.note || "") + "</div></div>";
-      }).join("");
-    };
-    var renderLog = function (log) {
-      log = log || [];
-      if (log.length === lastLogLen) return;
-      lastLogLen = log.length;
-      var box = $("#pg-log");
-      var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-      box.innerHTML = log.length ? log.map(function (r) {
-        return '<div class="log__row ' + esc(r.level || "info") + '"><span class="log__ts">' + esc(fmtTime(r.ts, true)) + '</span><span class="log__stage">' +
-          esc(r.stage || "") + '</span><span class="log__msg">' + esc(r.message) + "</span></div>";
-      }).join("") + (finished ? "" : '<div class="log__row"><span class="log__cursor"></span></div>')
-        : '<div class="log__empty">Ждём первых событий от пайплайна… <span class="log__cursor"></span></div>';
-      if (atBottom || log.length < 12) box.scrollTop = box.scrollHeight;
-    };
-    var renderIterations = function (its) {
-      its = its || [];
-      var key = its.map(function (i) { return i.id + ":" + (i.queries_json || []).length + ":" + i.results_count; }).join("|");
-      if (key === lastIterKey) return;
-      lastIterKey = key;
-      if (!its.length) return;
-      $("#pg-chain").innerHTML = its.map(function (it) {
-        var qs = (it.queries_json || []).map(function (q) {
-          return '<div class="query" title="' + esc(q.query) + '"><span class="query__agent query__agent--' + esc(q.agent) + '">' + esc(AGENT[q.agent] || q.agent) +
-            '</span><span class="query__q">' + esc(q.query) + '</span><span class="query__n">' + esc(q.results == null ? "" : q.results) + "</span></div>";
-        }).join("");
-        return '<div class="iter"><div class="iter__n">' + it.n + '</div><div class="iter__card"><div class="iter__head"><b>Итерация ' + it.n + "</b>" +
-          '<span class="muted small">' + (it.queries_json || []).length + " запросов · " + (it.results_count || 0) + " результатов · " + esc(fmtTime(it.created_at, true)) + "</span></div>" +
-          (it.rationale ? '<div class="rationale">' + esc(it.rationale) + "</div>" : "") + '<div class="queries">' + qs + "</div></div></div>";
-      }).join("");
-    };
-    var apply = function (data) {
-      var p = data.progress || {};
-      var pct = Math.max(0, Math.min(100, p.percent || 0));
-      $("#pg-bar").style.width = pct + "%";
-      $("#pg-percent").textContent = pct + "%";
-      var stateText = { running: "NEWSFLOW работает…", done: "Исследование завершено", error: "Ошибка: " + (p.error || "см. лог"), idle: "Ожидание запуска" };
-      var cur = (p.stages || []).filter(function (s) { return s.status === "running"; })[0];
-      $("#pg-state").textContent = (p.state === "running" && cur ? "Сейчас: " + (cur.title || cur.key) : stateText[p.state] || "Ожидание запуска");
-      renderStages(p.stages);
-      renderIterations(data.iterations);
-      var done = p.state === "done" || (data.status && data.status !== "researching");
-      if (done) finished = true;
-      renderLog(p.log);
-      if (done) {
-        $(".progress-big__bar").classList.add("is-done");
-        $("#pg-bar").style.width = "100%"; $("#pg-percent").textContent = "100%";
-        toast("Исследование завершено — открываем справку");
-        setTimeout(function () {
-          var u = new URL(location.href); u.searchParams.set("tab", "report"); u.searchParams.delete("msg"); u.searchParams.delete("level");
-          location.href = u.toString();
-        }, 1400);
-        return false;
-      }
-      if (p.state === "error") { finished = true; renderLog(p.log); return false; }
-      return true;
-    };
-    var poll = function () {
-      fetch(useFallback ? fallbackUrl : apiUrl, { credentials: "same-origin", headers: { Accept: "application/json" } })
-        .then(function (r) {
-          if (!r.ok) {
-            if (!useFallback && r.status !== 401) {
-              useFallback = true;
-              var note = $("#pg-api-note");
-              if (note) { note.textContent = "API прогресса ещё не готово (HTTP " + r.status + ") — читаем прогресс напрямую из базы."; note.classList.remove("hidden"); }
-              return null;
-            }
-            throw new Error(r.status);
-          }
-          return r.json();
-        })
-        .then(function (data) {
-          failures = 0;
-          if (data === null) { setTimeout(poll, 200); return; }
-          if (apply(data) !== false) setTimeout(poll, 1500);
-        })
-        .catch(function () { failures++; if (failures < 20) setTimeout(poll, 3000); });
-    };
-    poll();
-  }
-
-  /* ------------------------------------------------------------ редактор: word-level diff */
-  function tokenize(s) { return s.match(/\s+|[^\s]+/g) || []; }
-  function isWord(t) { return /\S/.test(t); }
-  /* LCS по токенам → массив операций [{op:'equal'|'delete'|'insert', t}] */
-  function diffTokens(a, b) {
-    var start = 0, endA = a.length, endB = b.length;
-    while (start < endA && start < endB && a[start] === b[start]) start++;
-    while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
-    var ops = [], i, j;
-    for (i = 0; i < start; i++) ops.push({ op: "equal", t: a[i] });
-    var A = a.slice(start, endA), B = b.slice(start, endB), n = A.length, m = B.length;
-    if (n * m > 4000000) {
-      A.forEach(function (t) { ops.push({ op: "delete", t: t }); });
-      B.forEach(function (t) { ops.push({ op: "insert", t: t }); });
-    } else if (n || m) {
-      var W = m + 1, L = new Uint32Array((n + 1) * W);
-      for (i = n - 1; i >= 0; i--) for (j = m - 1; j >= 0; j--)
-        L[i * W + j] = A[i] === B[j] ? L[(i + 1) * W + j + 1] + 1 : Math.max(L[(i + 1) * W + j], L[i * W + j + 1]);
-      i = 0; j = 0;
-      while (i < n && j < m) {
-        if (A[i] === B[j]) { ops.push({ op: "equal", t: A[i] }); i++; j++; }
-        else if (L[(i + 1) * W + j] >= L[i * W + j + 1]) { ops.push({ op: "delete", t: A[i] }); i++; }
-        else { ops.push({ op: "insert", t: B[j] }); j++; }
-      }
-      while (i < n) ops.push({ op: "delete", t: A[i++] });
-      while (j < m) ops.push({ op: "insert", t: B[j++] });
-    }
-    for (i = endA; i < a.length; i++) ops.push({ op: "equal", t: a[i] });
-    return ops;
-  }
-  function renderDiff(ops) {
-    var html = "", cur = null, buf = "";
-    var flush = function () {
-      if (!buf) return;
-      html += cur === "insert" ? "<ins>" + esc(buf) + "</ins>" : cur === "delete" ? "<del>" + esc(buf) + "</del>" : esc(buf);
-      buf = "";
-    };
-    ops.forEach(function (o) {
-      // пробелы между двумя изменёнными словами держим внутри изменения, чтобы не дробить подсветку
-      if (o.op !== cur) { flush(); cur = o.op; }
-      buf += o.t;
-    });
-    flush();
-    return html;
-  }
-
-  var editor = $("#editor");
-  if (editor) {
-    var aiBody = readJSON("nf-ai-body", "") || "";
-    var aiTitle = readJSON("nf-ai-title", "") || "";
-    var body = $("#edit-body"), titleIn = $("#edit-title");
-    var initialBody = body.value, initialTitle = titleIn.value;
-    var diffView = $("#diff-view"), checkView = $("#check-view"), stats = $("#diff-stats");
-    var pane = $("#edit-pane");
-    var aiTokens = tokenize(aiBody);
-
-    window.NF_DIRTY = function () { return body.value !== initialBody || titleIn.value !== initialTitle; };
-
-    var update = function () {
-      var text = body.value.replace(/\r\n/g, "\n");
-      var ops = diffTokens(aiTokens, tokenize(text));
-      diffView.innerHTML = renderDiff(ops);
-      var eq = 0, del = 0, ins = 0, wa = 0, wb = 0;
-      ops.forEach(function (o) {
-        if (!isWord(o.t)) return;
-        if (o.op === "equal") { eq++; wa++; wb++; } else if (o.op === "delete") { del++; wa++; } else { ins++; wb++; }
-      });
-      var ratio = (wa + wb) ? (2 * eq) / (wa + wb) : 1;
-      var pct = Math.round((1 - ratio) * 100);
-      $("#change-pct").textContent = pct + "%";
-      $("#change-bar").style.width = Math.min(100, pct) + "%";
-      stats.innerHTML = '<span class="plus">+' + ins + "</span> <span class=\"minus\">−" + del + "</span> " +
-        '<span class="muted">слов · ' + (pct < 15 ? "малая правка — AI-черновик принят" : pct < 40 ? "заметная правка" : "существенная переработка") + "</span>";
-      var found = highlightClaims(checkView, text);
-      $$("[data-claim-card]").forEach(function (card) {
-        var flag = $("[data-claim-changed]", card);
-        if (flag) flag.classList.toggle("hidden", !!found[card.getAttribute("data-claim-card")]);
-      });
-      pane.classList.toggle("is-dirty", window.NF_DIRTY());
-    };
-    var t;
-    body.addEventListener("input", function () { clearTimeout(t); t = setTimeout(update, 120); });
-    titleIn.addEventListener("input", function () { pane.classList.toggle("is-dirty", window.NF_DIRTY()); });
-    update();
-
-    var reset = $("#reset-ai");
-    if (reset) reset.addEventListener("click", function () {
-      if (!window.confirm("Заменить текст в поле правки на исходную AI-версию?")) return;
-      body.value = aiBody; titleIn.value = aiTitle; update();
-    });
-    $("#edit-form").addEventListener("submit", function () { window.NF_SKIP_UNLOAD = true; });
-    window.addEventListener("beforeunload", function (e) {
-      if (!window.NF_SKIP_UNLOAD && window.NF_DIRTY()) { e.preventDefault(); e.returnValue = ""; }
-    });
-    // вкладки нижней панели
-    var subtabs = $("[data-subtabs]");
-    if (subtabs) subtabs.addEventListener("click", function (e) {
-      var b = e.target.closest("[data-subtab]");
-      if (!b) return;
-      var name = b.getAttribute("data-subtab");
-      $$("[data-subtab]").forEach(function (x) { x.classList.toggle("is-active", x === b); });
-      $$("[data-subpanel]").forEach(function (p) { p.classList.toggle("hidden", p.getAttribute("data-subpanel") !== name); });
-      $("#diff-hint").textContent = name === "diff" ? "обновляется при вводе" : "утверждения AI, найденные в вашей правке";
-    });
-  }
 })();

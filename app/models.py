@@ -34,32 +34,11 @@ def utcnow() -> datetime:
 
 
 # ---------------------------------------------------------------- enums
-class Role(str, enum.Enum):
-    producer = "producer"
-    editor = "editor"
-    smm = "smm"
-    operator = "operator"  # AI-оператор, может всё
-
-    @property
-    def label(self) -> str:
-        return ROLE_LABELS[self]
-
-
-ROLE_LABELS = {
-    Role.producer: "Продюсер",
-    Role.editor: "Редактор",
-    Role.smm: "SMM",
-    Role.operator: "AI-оператор",
-}
-
-
 class InvestigationStatus(str, enum.Enum):
     new = "new"
     researching = "researching"
-    report_ready = "report_ready"
-    editing = "editing"
-    ready = "ready"
-    published = "published"
+    review = "review"
+    handed_off = "handed_off"
     rejected = "rejected"
 
     @property
@@ -68,14 +47,42 @@ class InvestigationStatus(str, enum.Enum):
 
 
 STATUS_LABELS = {
-    InvestigationStatus.new: "Новая зацепка",
-    InvestigationStatus.researching: "Исследование",
-    InvestigationStatus.report_ready: "Справка готова",
-    InvestigationStatus.editing: "На редактуре",
-    InvestigationStatus.ready: "Готово для SMM",
-    InvestigationStatus.published: "Опубликовано",
-    InvestigationStatus.rejected: "Отклонено",
+    InvestigationStatus.new: "Новый",
+    InvestigationStatus.researching: "AI ищет",
+    InvestigationStatus.review: "На проверке",
+    InvestigationStatus.handed_off: "Передано дальше",
+    InvestigationStatus.rejected: "Не подтвердилось",
 }
+STATUS_ORDER = list(InvestigationStatus)
+ACTIVE_STATUSES = frozenset({InvestigationStatus.new, InvestigationStatus.researching, InvestigationStatus.review})
+
+# Куда редактор передаёт новость (кнопка «Передать дальше»)
+HANDOFF_CHANNELS: dict[str, str] = {
+    "site": "Сайт",
+    "telegram": "Telegram-канал",
+    "max": "Канал MAX",
+    "tv": "ТВ/радио",
+    "print": "Печать/газета",
+    "social": "Соцсети",
+    "other": "Другое",
+}
+
+
+class Platform(str, enum.Enum):
+    max = "max"
+    telegram = "telegram"
+
+    @property
+    def label(self) -> str:
+        return PLATFORM_LABELS[self.value]
+
+
+PLATFORM_LABELS = {"max": "MAX", "telegram": "Telegram"}
+
+
+class StoryOrigin(str, enum.Enum):
+    manual = "manual"  # «Своя зацепка»
+    emerging = "emerging"  # из карточки «Возникающий сюжет»
 
 
 class SourceKind(str, enum.Enum):
@@ -101,11 +108,6 @@ class FactState(str, enum.Enum):
     false = "false"
 
 
-class Verdict(str, enum.Enum):
-    good = "good"  # «норм»
-    bad = "bad"  # «стрём»
-
-
 def _enum(e: type[enum.Enum]) -> SAEnum:
     return SAEnum(
         e,
@@ -123,7 +125,6 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128))
-    role: Mapped[Role] = mapped_column(_enum(Role), index=True)
     login: Mapped[str] = mapped_column(String(64), unique=True)  # для карточек логина
     title: Mapped[str | None] = mapped_column(String(128))  # подпись на карточке (должность)
 
@@ -141,14 +142,24 @@ class Channel(Base):
 
 
 class MaxChat(Base):
-    __tablename__ = "max_chats"
+    """Чат-источник (MAX или Telegram). Алиас ``SourceChat``."""
+
+    __tablename__ = "source_chats"
+    __table_args__ = (UniqueConstraint("platform", "external_id", name="uq_source_chat_ext"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    external_id: Mapped[str] = mapped_column(String(64), unique=True)
+    platform: Mapped[str] = mapped_column(String(16), default="max", index=True)
+    external_id: Mapped[str] = mapped_column(String(128))
+    ref: Mapped[str | None] = mapped_column(String(255))  # ссылка / @username, как ввёл редактор
+    username: Mapped[str | None] = mapped_column(String(128))  # Telegram: @username без @
+    kind: Mapped[str | None] = mapped_column(String(16))  # channel | group | chat
+    url: Mapped[str | None] = mapped_column(String(512))  # https://t.me/<username>
     title: Mapped[str] = mapped_column(String(255))
     district: Mapped[str | None] = mapped_column(String(128))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    added_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     messages: Mapped[list[ChatMessage]] = relationship(back_populates="chat")
 
@@ -158,15 +169,19 @@ class ChatMessage(Base):
     __table_args__ = (UniqueConstraint("chat_id", "external_id", name="uq_chat_message_ext"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    chat_id: Mapped[int] = mapped_column(ForeignKey("max_chats.id", ondelete="CASCADE"), index=True)
-    external_id: Mapped[str] = mapped_column(String(64))
-    author_external_id: Mapped[str] = mapped_column(String(64), index=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("source_chats.id", ondelete="CASCADE"), index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="max")
+    external_id: Mapped[str] = mapped_column(String(128))
+    author_external_id: Mapped[str] = mapped_column(String(128), index=True)
     author_name: Mapped[str | None] = mapped_column(String(128))
     text: Mapped[str] = mapped_column(Text)
     sent_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     has_media: Mapped[bool] = mapped_column(Boolean, default=False)
     media_url: Mapped[str | None] = mapped_column(String(1024))
+    message_url: Mapped[str | None] = mapped_column(String(1024))  # ссылка «открыть» (TG: https://t.me/…)
     is_forwarded: Mapped[bool] = mapped_column(Boolean, default=False)
+    views: Mapped[int | None] = mapped_column(Integer)  # просмотры (каналы Telegram)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)  # после перезапуска демо-потока
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     chat: Mapped[MaxChat] = relationship(back_populates="messages")
@@ -177,7 +192,7 @@ class AuthorProfile(Base):
 
     __tablename__ = "author_profiles"
 
-    external_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     name: Mapped[str | None] = mapped_column(String(128))
     phone: Mapped[str | None] = mapped_column(String(32))
     username: Mapped[str | None] = mapped_column(String(128))
@@ -185,6 +200,8 @@ class AuthorProfile(Base):
 
 
 class Investigation(Base):
+    """Сюжет (story). Имя таблицы/класса сохранено с v1."""
+
     __tablename__ = "investigations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -194,17 +211,37 @@ class Investigation(Base):
     status: Mapped[InvestigationStatus] = mapped_column(
         _enum(InvestigationStatus), default=InvestigationStatus.new, index=True
     )
-    producer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    editor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    origin: Mapped[str] = mapped_column(String(16), default="manual")  # manual | emerging
+    emerging_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     entities_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # см. CONTRACTS
     progress_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # см. CONTRACTS
+    deeper_questions: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)  # «Копать глубже»
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
-    report_ready_at: Mapped[datetime | None] = mapped_column(DateTime)  # для Time to Draft
+    signal_at: Mapped[datetime | None] = mapped_column(DateTime)  # первый сигнал (сообщение/создание)
+    review_at: Mapped[datetime | None] = mapped_column(DateTime)  # первый выход справки
+    # --- «Передать дальше»
+    handoff_to: Mapped[str | None] = mapped_column(String(255))
+    handoff_channel: Mapped[str | None] = mapped_column(String(32))
+    handoff_channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id", ondelete="SET NULL"))
+    handoff_comment: Mapped[str | None] = mapped_column(Text)
+    handed_off_at: Mapped[datetime | None] = mapped_column(DateTime)
+    handed_off_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
-    channel: Mapped[Channel | None] = relationship(lazy="selectin")
-    producer: Mapped[User | None] = relationship(foreign_keys=[producer_id], lazy="selectin")
-    editor: Mapped[User | None] = relationship(foreign_keys=[editor_id], lazy="selectin")
+    channel: Mapped[Channel | None] = relationship(foreign_keys=[channel_id], lazy="selectin")
+    owner: Mapped[User | None] = relationship(foreign_keys=[owner_id], lazy="selectin")
+    handed_off_by: Mapped[User | None] = relationship(foreign_keys=[handed_off_by_id], lazy="selectin")
+
+    @property
+    def status_label(self) -> str:
+        return InvestigationStatus(self.status).label
+
+    @property
+    def handoff_channel_label(self) -> str | None:
+        if not self.handoff_channel:
+            return None
+        return HANDOFF_CHANNELS.get(self.handoff_channel, self.handoff_channel)
 
 
 class SearchIteration(Base):
@@ -326,25 +363,23 @@ class StatusHistory(Base):
     user: Mapped[User | None] = relationship(lazy="selectin")
 
 
-class Feedback(Base):
-    __tablename__ = "feedback"
+class DismissedEmerging(Base):
+    """Скрытые редактором карточки «Возникающий сюжет»."""
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    investigation_id: Mapped[int] = mapped_column(
-        ForeignKey("investigations.id", ondelete="CASCADE"), index=True
-    )
-    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    verdict: Mapped[Verdict] = mapped_column(_enum(Verdict))
-    comment: Mapped[str | None] = mapped_column(Text)
+    __tablename__ = "dismissed_emerging"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
-    user: Mapped[User | None] = relationship(lazy="selectin")
+
+SourceChat = MaxChat
 
 
 __all__ = [
-    "Role", "InvestigationStatus", "SourceKind", "MediaKind", "DraftAuthorKind", "FactState",
-    "Verdict", "ROLE_LABELS", "STATUS_LABELS", "utcnow",
-    "User", "Channel", "MaxChat", "ChatMessage", "AuthorProfile", "Investigation",
+    "InvestigationStatus", "SourceKind", "MediaKind", "DraftAuthorKind", "FactState", "Platform",
+    "StoryOrigin", "STATUS_LABELS", "STATUS_ORDER", "ACTIVE_STATUSES", "HANDOFF_CHANNELS",
+    "PLATFORM_LABELS", "utcnow",
+    "User", "Channel", "MaxChat", "SourceChat", "ChatMessage", "AuthorProfile", "Investigation",
     "SearchIteration", "Source", "MediaItem", "Report", "Draft", "FactMark", "StatusHistory",
-    "Feedback",
+    "DismissedEmerging",
 ]

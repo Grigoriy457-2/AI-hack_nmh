@@ -4,12 +4,13 @@
 main.py вызывает ``seed_if_empty`` (если users пуста).
 
 Что создаётся:
-- пользователи всех ролей (пароль ``demo``);
+- редакторы ``editor``, ``editor2`` (пароль ``demo``; ролей в v2 нет);
 - 3 условных канала с историей постов (≥10 постов, разный стиль) + Channel DNA, если DEV-AI готов;
 - MAX-чаты и сообщения — через ``poller.sync_once`` (по умолчанию MockMaxClient);
-- 5 исторических расследований в разных статусах (2 опубликованы, 1 отклонено, 1 «зависло» на
-  редактуре, 1 готово для SMM) со справкой, источниками, черновиками AI + правками редактора,
-  отметками фактов и фидбэком — чтобы доска AI-оператора и метрики не были пустыми на демо.
+- 5 исторических сюжетов (3 переданы дальше, 1 не подтвердился, 1 на проверке) со справкой,
+  источниками, черновиками AI + правками редактора и отметками фактов — чтобы список сюжетов и
+  статистика не были пустыми на демо. Статусы v1 в спецификациях HISTORY отображаются на v2
+  (``_V1_STATUS``), логины v1 — на editor/editor2 (``_V1_USER``).
   Сценарий «Чертаново, хлопок ~14:30» НЕ сеется — его запускают вживую.
 """
 from __future__ import annotations
@@ -30,19 +31,16 @@ from app.models import (
     DraftAuthorKind,
     FactMark,
     FactState,
-    Feedback,
     Investigation,
     InvestigationStatus,
     MediaItem,
     MediaKind,
     Report,
-    Role,
     SearchIteration,
     Source,
     SourceKind,
     StatusHistory,
     User,
-    Verdict,
     utcnow,
 )
 
@@ -50,12 +48,21 @@ log = logging.getLogger("newsflow.seed")
 S = InvestigationStatus
 
 SEED_USERS: list[dict] = [
-    {"login": "producer", "name": "Анна Смирнова", "role": Role.producer, "title": "Продюсер"},
-    {"login": "producer2", "name": "Олег Кравцов", "role": Role.producer, "title": "Продюсер"},
-    {"login": "editor", "name": "Елена Воронина", "role": Role.editor, "title": "Редактор"},
-    {"login": "smm", "name": "Мария Ким", "role": Role.smm, "title": "SMM-менеджер"},
-    {"login": "operator", "name": "Игорь Белов", "role": Role.operator, "title": "AI-оператор"},
+    {"login": "editor", "name": "Елена Воронина", "title": "Редактор"},
+    {"login": "editor2", "name": "Олег Кравцов", "title": "Редактор"},
 ]
+
+# Спецификации HISTORY написаны в терминах v1 — отображаем на модель v2.
+_V1_USER = {"producer": "editor", "producer2": "editor2", "editor": "editor", "smm": "editor", "operator": "editor"}
+_V1_STATUS = {  # None — шаг пропускается (в v2 нет отдельного статуса)
+    "researching": S.researching, "report_ready": S.review, "editing": None, "ready": S.handed_off,
+    "published": S.handed_off, "rejected": S.rejected,
+}
+
+
+class _V1:  # статусы v1, на которые ссылается HISTORY
+    researching, report_ready, editing, ready, published, rejected = (
+        "researching", "report_ready", "editing", "ready", "published", "rejected")
 
 SEED_CHANNELS: list[dict] = [
     {
@@ -165,9 +172,9 @@ HISTORY: list[dict[str, Any]] = [
         "lead": "В чатах пишут, что на «Пражской» задымление, людей выводят наверх.",
         "channel": "@msk_srochno", "producer": "producer", "editor": "editor",
         "days_ago": 3.2, "ttd_min": 6,
-        "flow": [(S.researching, "producer", 0, "Запуск NEWSFLOW"), (S.report_ready, None, 6, None),
-                 (S.editing, "producer", 14, "Справка ок, в редактуру"),
-                 (S.ready, "editor", 31, None), (S.published, "smm", 40, None)],
+        "flow": [(_V1.researching, "producer", 0, "Запуск NEWSFLOW"), (_V1.report_ready, None, 6, None),
+                 (_V1.editing, "producer", 14, "Справка ок, в редактуру"),
+                 (_V1.ready, "editor", 31, None), (_V1.published, "smm", 40, None)],
         "entities": {"summary": "Задымление на станции «Пражская»", "event_type": "задымление",
                      "object": "станция метро", "keywords": ["Пражская", "задымление", "метро"],
                      "location": {"text": "ст. м. «Пражская»", "district": "Чертаново Северное", "address": None},
@@ -208,16 +215,16 @@ HISTORY: list[dict[str, Any]] = [
                      "мусора под эскалатором. Пострадавших нет.\n\n#метро #москва",
         "marks": [("c3", "Пострадавших нет", FactState.confirmed, "producer"),
                   ("unconfirmed-1", "В соцсетях писали о пострадавших", FactState.false, "producer")],
-        "feedback": [("producer", Verdict.good, "Быстро и чисто, первоисточник из чата сработал")],
+        "feedback": [("producer", "good", "Быстро и чисто, первоисточник из чата сработал")],
     },
     {
         "title": "Прорыв трубы теплосети на Кировоградской улице",
         "lead": "Жители Кировоградской пишут, что улицу заливает кипятком, идёт пар.",
         "channel": "@yuao_today", "producer": "producer", "editor": "editor",
         "days_ago": 2.1, "ttd_min": 8,
-        "flow": [(S.researching, "producer", 0, "Запуск NEWSFLOW"), (S.report_ready, None, 8, None),
-                 (S.editing, "producer", 20, None), (S.ready, "editor", 62, "Переписала под тон канала"),
-                 (S.published, "smm", 75, None)],
+        "flow": [(_V1.researching, "producer", 0, "Запуск NEWSFLOW"), (_V1.report_ready, None, 8, None),
+                 (_V1.editing, "producer", 20, None), (_V1.ready, "editor", 62, "Переписала под тон канала"),
+                 (_V1.published, "smm", 75, None)],
         "entities": {"summary": "Прорыв трубы теплосети на Кировоградской", "event_type": "авария ЖКХ",
                      "object": "теплосеть", "keywords": ["Кировоградская", "прорыв трубы", "кипяток"],
                      "location": {"text": "Кировоградская ул., 22", "district": "Чертаново Центральное", "address": "Кировоградская ул., 22"},
@@ -260,15 +267,15 @@ HISTORY: list[dict[str, Any]] = [
                      "восстановили к утру. Асфальт во дворе обещают переложить в течение недели.",
         "marks": [("c3", "Есть сведения о пострадавшем прохожем", FactState.unconfirmed, "editor"),
                   ("c2", "Без отопления остались 4 дома", FactState.confirmed, "producer")],
-        "feedback": [("producer", Verdict.good, "Норм тема для района, черновик пришлось сильно переписать под тон")],
+        "feedback": [("producer", "good", "Норм тема для района, черновик пришлось сильно переписать под тон")],
     },
     {
         "title": "Слух о закрытии поликлиники №170",
         "lead": "В чатах Чертанова пишут, что поликлинику №170 закрывают с понедельника.",
         "channel": "@gorod_bez_paniki", "producer": "producer2", "editor": None,
         "days_ago": 1.4, "ttd_min": 5,
-        "flow": [(S.researching, "producer2", 0, "Запуск NEWSFLOW"), (S.report_ready, None, 5, None),
-                 (S.rejected, "producer2", 18, "Слух, первоисточник — старое объявление")],
+        "flow": [(_V1.researching, "producer2", 0, "Запуск NEWSFLOW"), (_V1.report_ready, None, 5, None),
+                 (_V1.rejected, "producer2", 18, "Слух, первоисточник — старое объявление")],
         "entities": {"summary": "Слух о закрытии поликлиники №170", "event_type": "слух",
                      "object": "поликлиника", "keywords": ["поликлиника 170", "закрытие"],
                      "location": {"text": "Чертаново", "district": "Чертаново Центральное", "address": None},
@@ -298,15 +305,15 @@ HISTORY: list[dict[str, Any]] = [
         "claims": [("поликлиника работает в обычном режиме", [3], "confirmed"),
                    ("на ремонт закрыт один кабинет", [3], "confirmed")],
         "marks": [("unconfirmed-1", "Поликлинику закрывают с понедельника", FactState.false, "producer2")],
-        "feedback": [("producer2", Verdict.bad, "Стрём: чистый вброс, тема не наша")],
+        "feedback": [("producer2", "bad", "Стрём: чистый вброс, тема не наша")],
     },
     {
         "title": "Обрушение балкона на Медынской улице",
         "lead": "В Бирюлёве Западном на Медынской обрушился балкон, жильцы прислали фото.",
         "channel": "@yuao_today", "producer": "producer2", "editor": "editor",
         "days_ago": 0.12, "ttd_min": 7,  # ~3 часа назад; на редактуре дольше STALE_AFTER_MINUTES
-        "flow": [(S.researching, "producer2", 0, "Запуск NEWSFLOW"), (S.report_ready, None, 7, None),
-                 (S.editing, "producer2", 15, "Нужен комментарий жилинспекции")],
+        "flow": [(_V1.researching, "producer2", 0, "Запуск NEWSFLOW"), (_V1.report_ready, None, 7, None),
+                 (_V1.editing, "producer2", 15, "Нужен комментарий жилинспекции")],
         "entities": {"summary": "Обрушение балкона на Медынской", "event_type": "обрушение",
                      "object": "балкон жилого дома", "keywords": ["Медынская", "балкон", "обрушение"],
                      "location": {"text": "Медынская ул.", "district": "Бирюлёво Западное", "address": None},
@@ -343,8 +350,8 @@ HISTORY: list[dict[str, Any]] = [
         "lead": "В ЖК «Ясный» и соседних домах нет света уже час.",
         "channel": "@msk_srochno", "producer": "producer2", "editor": "editor",
         "days_ago": 0.9, "ttd_min": 4,
-        "flow": [(S.researching, "producer2", 0, "Запуск NEWSFLOW"), (S.report_ready, None, 4, None),
-                 (S.editing, "producer2", 10, None), (S.ready, "editor", 22, None)],
+        "flow": [(_V1.researching, "producer2", 0, "Запуск NEWSFLOW"), (_V1.report_ready, None, 4, None),
+                 (_V1.editing, "producer2", 10, None), (_V1.ready, "editor", 22, None)],
         "entities": {"summary": "Отключение света в Зябликове", "event_type": "авария энергосети",
                      "object": "жилые дома", "keywords": ["Зябликово", "нет света"],
                      "location": {"text": "Зябликово", "district": "Зябликово", "address": None},
@@ -379,7 +386,7 @@ HISTORY: list[dict[str, Any]] = [
                      "Лифты стояли, жители сидели без света с 19:10.\n\nЭлектроснабжение восстановили "
                      "к 22:15, сообщили в МОЭСК.\n\n#юао #зябликово",
         "marks": [],
-        "feedback": [("producer2", Verdict.good, "Норм, быстро собрали")],
+        "feedback": [("producer2", "good", "Норм, быстро собрали")],
     },
 ]
 
@@ -421,16 +428,34 @@ async def _seed_investigation(session: AsyncSession, spec: dict[str, Any], users
                               channels: dict[str, Channel], now: datetime) -> None:
     created = now - timedelta(days=spec["days_ago"])
     at = lambda minutes: created + timedelta(minutes=minutes)  # noqa: E731
-    producer = users[spec["producer"]]
-    editor = users.get(spec["editor"]) if spec.get("editor") else None
-    last_status, last_at = spec["flow"][-1][0], at(spec["flow"][-1][2])
-    ever_editing = any(st == S.editing for st, *_ in spec["flow"])
+    producer = users[_V1_USER[spec["producer"]]]
+    editor = users.get(_V1_USER[spec["editor"]]) if spec.get("editor") else None
+    flow = [(_V1_STATUS[st], _V1_USER.get(who) if who else None, m, c)
+            for st, who, m, c in spec["flow"] if _V1_STATUS[st] is not None]
+    # подряд идущие одинаковые статусы (ready -> published) схлопываем, берём последний
+    dedup: list[tuple] = []
+    for step in flow:
+        if dedup and dedup[-1][0] == step[0]:
+            dedup[-1] = (step[0], dedup[-1][1], step[2], step[3] or dedup[-1][3])
+        else:
+            dedup.append(step)
+    flow = dedup
+    last_status, last_at = flow[-1][0], at(flow[-1][2])
+    channel = channels[spec["channel"]]
+    handed = last_status == S.handed_off
 
     inv = Investigation(
-        title=spec["title"], lead_text=spec["lead"], channel_id=channels[spec["channel"]].id,
-        status=last_status, producer_id=producer.id, editor_id=editor.id if editor and ever_editing else None,
+        title=spec["title"], lead_text=spec["lead"], channel_id=channel.id,
+        status=last_status, owner_id=producer.id, origin="manual",
         entities_json=spec["entities"], progress_json=_progress_done(at(0), at(spec["ttd_min"])),
-        created_at=created, updated_at=last_at, report_ready_at=at(spec["ttd_min"]),
+        created_at=created, updated_at=last_at, signal_at=created - timedelta(minutes=4),
+        review_at=at(spec["ttd_min"]),
+        handoff_to=f"Выпускающий редактор «{channel.name}»" if handed else None,
+        handoff_channel="telegram" if handed else None,
+        handoff_channel_id=channel.id if handed else None,
+        handoff_comment=(spec.get("feedback") or [(None, None, None)])[0][2] if handed else None,
+        handed_off_at=last_at if handed else None,
+        handed_off_by_id=(editor or producer).id if handed else None,
     )
     session.add(inv)
     await session.flush()
@@ -440,7 +465,7 @@ async def _seed_investigation(session: AsyncSession, spec: dict[str, Any], users
     session.add(StatusHistory(investigation_id=inv.id, from_status=None, to_status=S.new,
                               user_id=producer.id, comment="Зацепка создана", created_at=created))
     prev = S.new
-    for to, who, minutes, comment in spec["flow"]:
+    for to, who, minutes, comment in flow:
         session.add(StatusHistory(investigation_id=inv.id, from_status=prev, to_status=to,
                                   user_id=users[who].id if who else None, comment=comment,
                                   created_at=at(minutes)))
@@ -510,17 +535,14 @@ async def _seed_investigation(session: AsyncSession, spec: dict[str, Any], users
     session.add(Draft(investigation_id=inv.id, version=1, author_kind=DraftAuthorKind.ai, title=spec["draft_title"],
                       body=spec["draft_body"], claims_json=claims, created_at=at(spec["ttd_min"])))
     if spec.get("edit_body") and editor is not None:
-        edit_at = next((at(m) for st, _w, m, _c in spec["flow"] if st == S.ready), last_at)
+        edit_at = next((at(m) for st, _w, m, _c in flow if st == S.handed_off), last_at)
         session.add(Draft(investigation_id=inv.id, version=2, author_kind=DraftAuthorKind.editor,
                           author_user_id=editor.id, title=spec.get("edit_title") or spec["draft_title"],
                           body=spec["edit_body"], claims_json=claims, created_at=edit_at - timedelta(minutes=2)))
 
     for claim_id, text, state, who in spec["marks"]:
         session.add(FactMark(investigation_id=inv.id, claim_id=claim_id, fact_text=text, state=state,
-                             user_id=users[who].id, created_at=at(spec["ttd_min"] + 5)))
-    for who, verdict, comment in spec["feedback"]:
-        session.add(Feedback(investigation_id=inv.id, user_id=users[who].id, verdict=verdict, comment=comment,
-                             created_at=last_at + timedelta(minutes=10)))
+                             user_id=users[_V1_USER[who]].id, created_at=at(spec["ttd_min"] + 5)))
 
 
 async def _seed_max(session: AsyncSession) -> None:
@@ -578,7 +600,7 @@ async def seed_if_empty(session: AsyncSession) -> bool:
 
 async def _main(reset: bool) -> None:
     logging.basicConfig(level=logging.INFO)
-    await db.init_db(drop=reset)
+    await db.init_db(drop=reset)  # init_db сам пересоздаёт схему v1
     async with db.session_scope() as session:
         done = await seed_if_empty(session)
     await db.dispose()

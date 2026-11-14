@@ -1,0 +1,382 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import icon, status as status_chip, platform, plate %}
+{% block title %}{{ inv.title }}{% endblock %}
+{% block body_class %}{% if status != 'handed_off' %} has-actionbar{% endif %}{% endblock %}
+
+{% macro src_refs(ids) -%}
+{%- if ids -%}<span class="fact__src">{% for sid in ids %}{% if source_num.get(sid) %}<button type="button" class="src-ref" data-src="{{ sid }}" title="Источник {{ source_num[sid] }}">{{ source_num[sid] }}</button>{% endif %}{% endfor %}</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro img_ok(u) -%}{{ 'y' if u and (u.startswith('http://') or u.startswith('https://') or u.startswith('data:image') or u.startswith('/static/')) }}{%- endmacro %}
+
+{% block content %}
+{% set p = progress %}
+<header class="story-head">
+  <div>
+    <div class="story-head__crumbs">
+      <a href="/">{{ icon('back') }}Радар</a>
+      <span class="t">Сюжет {{ inv.id }}</span>
+      {{ status_chip(inv.status) }}
+      <span>{% if (inv.origin|ev) == 'emerging' %}из возможного сюжета{% else %}своя зацепка{% endif %}{% if inv.signal_at %}, первый сигнал <span class="t">{{ inv.signal_at|dt }}</span>{% endif %}</span>
+    </div>
+    <h1>{{ inv.title }}</h1>
+    <p class="story-head__lead" title="Нажмите, чтобы раскрыть зацепку целиком" onclick="this.classList.toggle('is-open')">{{ inv.lead_text }}</p>
+  </div>
+  {% if status != 'handed_off' %}<div class="actionbar" data-actions>
+    {% if status == 'new' %}
+      <button class="btn btn--stop" type="button" data-open="dlg-reject">{{ icon('x') }}Не подтвердилось</button>
+      <button class="btn btn--primary" type="button" data-act="run">{{ icon('search') }}Исследовать</button>
+    {% elif status == 'researching' %}
+      <button class="btn" type="button" data-act="stop">Остановить поиск</button>
+    {% elif status == 'review' %}
+      <button class="btn" type="button" data-open="dlg-deeper">{{ icon('deeper') }}Копать глубже</button>
+      <button class="btn btn--stop" type="button" data-open="dlg-reject">{{ icon('x') }}Не подтвердилось</button>
+      <button class="btn btn--go" type="button" data-open="dlg-handoff">{{ icon('send') }}Передать дальше</button>
+    {% elif status == 'rejected' %}
+      <button class="btn" type="button" data-act="reopen">Вернуть в работу</button>
+    {% endif %}
+  </div>{% endif %}
+</header>
+
+{% if status == 'handed_off' %}
+<div class="handoff-note" style="margin: 0 4px var(--gap)">
+  Передано дальше <span class="t">{{ inv.handed_off_at|dt }}</span>: <b>{{ inv.handoff_to }}</b>{% if inv.handoff_channel %}, {{ HANDOFF_CHANNELS.get(inv.handoff_channel, inv.handoff_channel) }}{% endif %}.
+  {% if inv.handoff_comment %}<br>Комментарий: {{ inv.handoff_comment }}{% endif %}
+</div>
+{% elif status == 'rejected' %}
+<div class="handoff-note is-rejected" style="margin: 0 4px var(--gap)">
+  {% set ns = namespace(reason=None) %}{% for h in history %}{% if (h.to_status|ev) == 'rejected' and h.comment %}{% set ns.reason = h.comment %}{% endif %}{% endfor %}
+  Сюжет отмечен как «Не подтвердилось».{% if ns.reason %} Причина: {{ ns.reason }}{% endif %}
+</div>
+{% endif %}
+
+<div class="switcher" role="group" aria-label="Разделы сюжета">
+  <button type="button" data-show="col-main" aria-pressed="true">Справка и текст</button>
+  <button type="button" data-show="col-side" aria-pressed="false">Звонки и источники</button>
+  <button type="button" data-show="col-chain" aria-pressed="false">Ход поиска</button>
+</div>
+
+<div class="story-desk" data-desk>
+  {# ================================================================ ход поиска #}
+  <div class="stack" id="col-chain">
+    <section class="pane" aria-labelledby="chain-h">
+      <div class="pane__head">
+        <h2 id="chain-h">Ход поиска</h2>
+        <span class="count" data-percent>{% if p.state == 'running' %}{{ p.percent or 0 }}%{% elif p.state == 'done' %}готово{% elif p.state == 'error' %}ошибка{% endif %}</span>
+      </div>
+      <div class="pane__body">
+        {% if status == 'researching' %}<div class="bar" style="margin:0 0 12px"><i data-bar style="width: {{ p.percent or 3 }}%"></i></div>{% endif %}
+        <ol class="stages" data-stages>
+          {% for st in p.stages or [] %}
+          <li class="stage is-{{ st.status }}"><span class="stage__dot"></span><span>{{ st.title }}</span><span class="stage__note">{{ st.note or '' }}</span></li>
+          {% endfor %}
+        </ol>
+        {% if p.error %}<div class="flash flash--err" style="margin:0 0 12px">{{ p.error }}</div>{% endif %}
+        {% if iterations %}
+        <h3 style="font-size:15px;margin:6px 0 10px">Цепочка гипотез</h3>
+        <ol class="chain" data-chain>
+          {% for it in iterations %}
+          <li>
+            <div class="chain__why">{{ it.rationale or 'Первые запросы по зацепке' }}</div>
+            <ul class="chain__q">
+              {% for q in it.queries_json or [] %}
+              <li><span><span class="agent">{{ AGENT_LABELS.get(q.agent, q.agent) }}</span> {{ q.query }}</span><span class="n" title="найдено / новых">{{ q.results or 0 }}{% if q.new is not none %} / {{ q.new }}{% endif %}</span></li>
+              {% endfor %}
+            </ul>
+          </li>
+          {% endfor %}
+        </ol>
+        {% elif status == 'new' %}
+        <p class="muted">Поиск ещё не запускали. Нажмите «Исследовать» — AI разберёт зацепку и пойдёт по чатам, сайтам и официальным источникам.</p>
+        {% endif %}
+        {% if deeper_questions %}
+        <h3 style="font-size:15px;margin:10px 0 6px">Ваши вопросы для «Копать глубже»</h3>
+        <ul class="chain__q">{% for q in deeper_questions %}<li><span>{{ q.question or 'без вопроса — ещё один круг поиска' }}</span><span class="n">{{ q.asked_at|dt('time') }}</span></li>{% endfor %}</ul>
+        {% endif %}
+        {% if p.log %}
+        <details class="dups" style="margin-top:12px" {{ 'open' if status == 'researching' }}>
+          <summary>Журнал поиска</summary>
+          <ol class="log" data-log>
+            {% for l in p.log[-40:] %}<li class="is-{{ l.level }}"><span class="t">{{ l.ts|dt('time') }}</span><span>{{ l.message }}</span></li>{% endfor %}
+          </ol>
+        </details>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  {# ================================================================ справка / черновик #}
+  <section class="pane pane--main is-shown" id="col-main">
+    <div class="tabs" role="tablist" aria-label="Справка и черновик">
+      <button class="tab" role="tab" id="tab-report" aria-controls="panel-report" aria-selected="true" data-tab="report">Справка</button>
+      <button class="tab" role="tab" id="tab-draft" aria-controls="panel-draft" aria-selected="false" data-tab="draft">Черновик{% if current_draft %} <span class="count t">v{{ current_draft.version }}</span>{% endif %}</button>
+      <button class="tab" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" data-tab="history">История <span class="count">{{ history|length }}</span></button>
+    </div>
+
+    {# ---------- справка #}
+    <div class="tabpanel" role="tabpanel" id="panel-report" aria-labelledby="tab-report">
+      {% if report %}
+      <div class="checkline" data-checkline>
+        <span>Отмечено фактов:</span>
+        <span><b data-tally="confirmed">{{ tally.confirmed }}</b> подтверждено</span>
+        <span class="is-open"><b data-tally="open">{{ tally.open }}</b> ждут проверки</span>
+        <span><b data-tally="false">{{ tally.false }}</b> ложь</span>
+      </div>
+      {% for sec in report.sections or [] %}
+      {% if sec.text or sec['items'] %}
+      <section class="rep-sec" id="sec-{{ sec.key }}">
+        <h3>{{ sec.title }}{% if sec['items'] %} <span class="count">{{ sec['items']|length }}</span>{% endif %}</h3>
+        {% if sec.text %}<p class="rep-sec__text">{{ sec.text }}</p>{% endif %}
+        {% if sec['items'] %}
+        <ul class="facts">
+          {% for it in sec['items'] %}
+          {% set st = states.get(it.id|string, {}).get('state') if it.id else it.state %}
+          {% if sec.key in fact_sections and it.id %}
+          <li class="fact" data-fact="{{ it.id }}" data-text="{{ it.text }}" data-state="{{ st or '' }}" id="item-{{ it.id }}">
+            <div class="fact__text">{% if it.time %}<span class="fact__time">{{ it.time }}</span>{% endif %}{{ it.text }}{{ src_refs(it.source_ids) }}</div>
+            <div class="mark" role="group" aria-label="Отметка факта">
+              <button type="button" data-state="confirmed" aria-pressed="{{ 'true' if st == 'confirmed' else 'false' }}">подтверждён</button>
+              <button type="button" data-state="unconfirmed" aria-pressed="{{ 'true' if st == 'unconfirmed' else 'false' }}">не подтверждён</button>
+              <button type="button" data-state="false" aria-pressed="{{ 'true' if st == 'false' else 'false' }}">ложь</button>
+            </div>
+          </li>
+          {% else %}
+          <li class="fact" data-state="{{ 'confirmed' if sec.key == 'sources' else (st or 'confirmed') }}" style="border-left-color: var(--line)">
+            <div class="fact__text">{% if it.time %}<span class="fact__time">{{ it.time }}</span>{% endif %}{{ it.text }}{% if it.possibly_old %} <span class="badge badge--old">возможно старое фото</span>{% endif %}{{ src_refs(it.source_ids) }}</div>
+          </li>
+          {% endif %}
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </section>
+      {% endif %}
+      {% endfor %}
+      {% elif status in ('new', 'researching') %}
+      <div class="empty"><b>Справка появится после поиска</b>{% if status == 'researching' %}AI сейчас ищет: ход поиска слева, страница обновится сама.{% else %}Запустите поиск кнопкой «Исследовать».{% endif %}</div>
+      {% else %}
+      <div class="empty"><b>Справки нет</b>Поиск не дал результата. Попробуйте «Копать глубже» с уточняющим вопросом.</div>
+      {% endif %}
+    </div>
+
+    {# ---------- черновик #}
+    <div class="tabpanel" role="tabpanel" id="panel-draft" aria-labelledby="tab-draft" hidden>
+      {% if current_draft %}
+      <div class="draft-meta">
+        <div class="seg" role="group" aria-label="Режим черновика">
+          <button type="button" data-mode="read" aria-pressed="true">Текст</button>
+          {% if page_data.can_edit %}<button type="button" data-mode="edit" aria-pressed="false">Править</button>{% endif %}
+          <button type="button" data-mode="diff" aria-pressed="false">Сравнить с AI</button>
+        </div>
+        <span data-version>
+          {% if (current_draft.author_kind|ev) == 'ai' %}<span class="ai-mark">{{ icon('ai') }}AI-версия v{{ current_draft.version }}</span>
+          {% else %}Ваша правка v{{ current_draft.version }}, <span class="t">{{ current_draft.created_at|dt('time') }}</span>{% endif %}
+        </span>
+        <span class="diff-stat muted" data-diff-stat></span>
+      </div>
+
+      <div data-view="read">
+        <div class="draft-read" data-draft-read></div>
+      </div>
+
+      {% if page_data.can_edit %}
+      <form data-view="edit" data-draft-form hidden>
+        <label class="sr-only" for="d-title">Заголовок</label>
+        <input class="input draft-title-input" id="d-title" name="title" value="{{ current_draft.title }}">
+        <label class="sr-only" for="d-body">Текст</label>
+        <textarea class="input draft-body" id="d-body" name="body" rows="14">{{ current_draft.body }}</textarea>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn btn--primary" type="submit">Сохранить правку</button>
+          <button class="btn btn--quiet" type="button" data-draft-reset>Отменить изменения</button>
+          <span class="muted" style="font-size:13.5px">Сохраняется как новая версия, AI-текст остаётся для сравнения.</span>
+        </div>
+      </form>
+      {% endif %}
+
+      <div data-view="diff" hidden>
+        <p class="muted" style="font-size:13.5px;margin-bottom:10px">Зелёным — что вы добавили, красным — что убрали из текста AI (v{{ ai_draft.version }}).</p>
+        <div class="diff" data-diff></div>
+      </div>
+
+      {% if claims %}
+      <h3 style="font-size:15px;margin:20px 0 2px">Утверждения в тексте</h3>
+      <p class="muted" style="font-size:13.5px;margin:0">Жёлтым в тексте подсвечено то, что ещё не подтверждено. Нажмите на утверждение, чтобы открыть источник.</p>
+      <ul class="claims" data-claims></ul>
+      {% endif %}
+      {% else %}
+      <div class="empty"><b>Черновика пока нет</b>AI напишет его в стиле выбранного канала, когда справка будет готова.</div>
+      {% endif %}
+    </div>
+
+    {# ---------- история #}
+    <div class="tabpanel" role="tabpanel" id="panel-history" aria-labelledby="tab-history" hidden>
+      <ul class="facts">
+        {% for h in history %}
+        <li class="fact" data-state="{{ 'confirmed' if (h.to_status|ev) == 'handed_off' else ('false' if (h.to_status|ev) == 'rejected' else 'x') }}" style="{{ '' if (h.to_status|ev) in ('handed_off', 'rejected') else 'border-left-color: var(--line)' }}">
+          <div class="fact__text">
+            <span class="fact__time">{{ h.created_at|dt }}</span>
+            {% if h.from_status %}{{ h.from_status|status_label }} → {% endif %}<b>{{ h.to_status|status_label }}</b>
+            <span class="muted">{{ h.user.name if h.user else 'система' }}</span>
+            {% if h.comment %}<div class="muted" style="font-size:13.5px">{{ h.comment }}</div>{% endif %}
+          </div>
+        </li>
+        {% endfor %}
+        {% for d in drafts %}
+        <li class="fact" data-state="x" style="border-left-color: var(--line)"><div class="fact__text"><span class="fact__time">{{ d.created_at|dt }}</span>Черновик v{{ d.version }}: {{ 'AI' if (d.author_kind|ev) == 'ai' else 'правка редактора' }}</div></li>
+        {% endfor %}
+      </ul>
+    </div>
+  </section>
+
+  {# ================================================================ звонки, источники, медиа #}
+  <div class="stack" id="col-side">
+    <section class="pane" aria-labelledby="call-h">
+      <div class="pane__head"><h2 id="call-h">Кому позвонить</h2><span class="count">{{ contacts|length }}</span></div>
+      <div class="pane__body">
+        {% for c in contacts %}
+        <div class="callee">
+          <div class="callee__row">
+            <span class="callee__name">{{ c.name or 'Автор скрыт' }}</span>
+            {% if c.platform is defined and c.platform %}{{ platform(c.platform|ev, True) }}{% endif %}
+            {% if c.chat_title %}{{ plate(c.chat_title) }}{% endif %}
+            <span class="t muted">{{ c.sent_at|dt('time') }}</span>
+          </div>
+          <p class="callee__quote">{{ c.quote }}</p>
+          {% if c.phone %}
+          <a class="tel" href="{{ c.phone|tel }}">{{ icon('phone') }}{{ c.phone }}</a>
+          {% else %}
+          <span class="tel tel--none">Телефон скрыт в профиле{% if c.username %}, пишите @{{ c.username }}{% endif %}</span>
+          {% endif %}
+        </div>
+        {% else %}
+        <p class="muted" style="font-size:14px">{% if status in ('new', 'researching') %}Очевидцы появятся после поиска: это авторы первых уникальных сообщений с важными подробностями.{% else %}Среди источников нет очевидцев с уникальными важными сообщениями.{% endif %}</p>
+        {% endfor %}
+        <p class="muted" style="font-size:12.5px;margin:10px 0 0">Телефоны берутся из открытых профилей авторов. Бот добавлен в чаты администраторами с согласия участников.</p>
+      </div>
+    </section>
+
+    <section class="pane pane--grow" aria-labelledby="src-h">
+      <div class="pane__head"><h2 id="src-h">Источники</h2><span class="count">{{ source_groups|length }}{% if sources|length != source_groups|length %} + {{ sources|length - source_groups|length }} копий{% endif %}</span></div>
+      <div class="pane__body" data-sources-scroll>
+        {% for g in source_groups %}
+        {% set s = g.primary %}
+        {% set msg = s.chat_message %}
+        <article class="src" id="src-{{ s.id }}">
+          <div class="src__head">
+            <span class="src__n t">{{ source_num[s.id] }}</span>
+            {% if platform_of[s.id] %}{{ platform(platform_of[s.id], True) }}{% else %}<span class="kind">{{ SOURCE_KIND_LABELS.get(s.kind|ev, s.kind|ev) }}</span>{% endif %}
+            {% if s.is_primary and g.duplicates %}<span class="badge badge--unique">первоисточник</span>{% endif %}
+            {% if s.is_important %}<span class="badge badge--important">важное</span>{% endif %}
+          </div>
+          <div class="src__title">{% if s.url|safe_url %}<a href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.title or s.url|host }}</a>{% else %}{{ s.title or (msg.author_name if msg else 'Источник') }}{% endif %}</div>
+          {% if s.snippet or msg %}<div class="src__snip">{{ (s.snippet or msg.text)|truncate(220) }}</div>{% endif %}
+          <div class="src__meta">
+            {% if msg and chats_by_id.get(msg.chat_id) %}<span>{{ chats_by_id[msg.chat_id].title }}</span>{% elif s.url|safe_url %}<span>{{ s.url|host }}</span>{% endif %}
+            <span class="t">{{ (s.published_at or (msg.sent_at if msg else None))|dt }}</span>
+            {% if s.uniqueness_score is not none %}<span>уникальность {{ s.uniqueness_score|pct }}</span>{% endif %}
+          </div>
+          {% if g.duplicates %}
+          <details class="dups">
+            <summary>{{ g.duplicates|length }} {{ plural(g.duplicates|length, 'копия', 'копии', 'копий') }}{% if g.cross %}, в {% for pl in g.platforms %}{{ PLATFORM_LABELS.get(pl, pl) }}{{ ' и ' if not loop.last }}{% endfor %}{% endif %}, не считаются отдельным подтверждением</summary>
+            {% for d in g.duplicates %}
+            {% set dm = d.chat_message %}
+            <div class="src" id="src-{{ d.id }}">
+              <div class="src__head"><span class="src__n t">{{ source_num[d.id] }}</span>{% if platform_of[d.id] %}{{ platform(platform_of[d.id], True) }}{% endif %}<span class="src__title">{{ d.title or (dm.author_name if dm else '') }}</span></div>
+              <div class="src__meta">{% if dm and chats_by_id.get(dm.chat_id) %}<span>{{ chats_by_id[dm.chat_id].title }}</span>{% endif %}<span class="t">{{ (d.published_at or (dm.sent_at if dm else None))|dt }}</span></div>
+            </div>
+            {% endfor %}
+          </details>
+          {% endif %}
+        </article>
+        {% else %}
+        <p class="muted" style="font-size:14px">Источники появятся в ходе поиска.</p>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% if media %}
+    <section class="pane" aria-labelledby="media-h">
+      <div class="pane__head"><h2 id="media-h">Фото и видео</h2><span class="count">{{ media|length }}</span></div>
+      <div class="pane__body">
+        <div class="media-grid">
+          {% for m in media %}
+          {% set u = m.thumbnail_url or m.url %}
+          <figure class="media {{ 'is-old' if m.possibly_old }}" style="margin:0">
+            {% if img_ok(u) %}<img src="{{ u }}" alt="{{ m.relation or 'Фото из источника' }}" loading="lazy">{% else %}<div class="media__ph">{{ icon('video' if (m.kind|ev) == 'video' else 'image') }}</div>{% endif %}
+            {% if m.possibly_old %}<span class="badge badge--old">возможно старое фото</span>{% endif %}
+            <figcaption class="media__cap">{{ m.origin or '' }}{% if m.captured_at %} <span class="t">{{ m.captured_at|dt }}</span>{% endif %}{% if m.relation %}<br><span class="muted">{{ m.relation|truncate(90) }}</span>{% endif %}<br><span class="muted">права не проверены</span></figcaption>
+          </figure>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+</div>
+
+{# ================================================================ модалки #}
+<dialog class="modal" id="dlg-handoff" aria-labelledby="dlg-handoff-h">
+  <form method="dialog" data-handoff-form>
+    <div class="modal__head"><h2 id="dlg-handoff-h">Передать дальше</h2><button class="icon-btn" type="button" data-close aria-label="Закрыть">{{ icon('x') }}</button></div>
+    <div class="modal__body">
+      <div class="warnbox" data-handoff-check>Проверяем факты…</div>
+      <div class="field">
+        <label for="h-to">Кому или куда</label>
+        <input class="input" id="h-to" name="to" required list="h-to-list" placeholder="Например: дежурный выпускающий сайта">
+        <datalist id="h-to-list"><option value="Дежурный выпускающий сайта"><option value="Ночная смена Telegram-канала"><option value="Шеф-редактор"><option value="Выпуск новостей ТВ"></datalist>
+      </div>
+      <div class="field">
+        <span class="label">Канал</span>
+        <div class="radios">
+          {% for k, v in HANDOFF_CHANNELS.items() %}<label><input type="radio" name="channel" value="{{ k }}" {{ 'checked' if loop.first }}>{{ v }}</label>{% endfor %}
+        </div>
+      </div>
+      <div class="field">
+        <label for="h-comment">Комментарий</label>
+        <textarea class="input" id="h-comment" name="comment" rows="3" placeholder="Что важно знать тому, кто получит новость"></textarea>
+      </div>
+    </div>
+    <div class="modal__foot">
+      <button class="btn btn--quiet" type="button" data-close>Отмена</button>
+      <button class="btn btn--go" type="submit" data-handoff-submit>{{ icon('send') }}Передать дальше</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-deeper" aria-labelledby="dlg-deeper-h">
+  <form method="dialog" data-deeper-form>
+    <div class="modal__head"><h2 id="dlg-deeper-h">Копать глубже</h2><button class="icon-btn" type="button" data-close aria-label="Закрыть">{{ icon('x') }}</button></div>
+    <div class="modal__body">
+      <p class="muted" style="font-size:14px">AI сделает ещё один круг поиска по чатам, сайтам и официальным источникам. Справка и черновик пересоберутся, ваши правки останутся в истории версий.</p>
+      <div class="field">
+        <label for="dq">Что выяснить</label>
+        <textarea class="input" id="dq" name="question" rows="3" placeholder="Например: есть ли пострадавшие, что говорит управа района"></textarea>
+      </div>
+    </div>
+    <div class="modal__foot">
+      <button class="btn btn--quiet" type="button" data-close>Отмена</button>
+      <button class="btn btn--primary" type="submit">{{ icon('deeper') }}Искать дальше</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-reject" aria-labelledby="dlg-reject-h">
+  <form method="dialog" data-reject-form>
+    <div class="modal__head"><h2 id="dlg-reject-h">Не подтвердилось</h2><button class="icon-btn" type="button" data-close aria-label="Закрыть">{{ icon('x') }}</button></div>
+    <div class="modal__body">
+      <p class="muted" style="font-size:14px">Сюжет уйдёт из работы. Вернуть его можно в любой момент.</p>
+      <div class="field">
+        <label for="rc">Почему</label>
+        <textarea class="input" id="rc" name="comment" rows="3" placeholder="Например: в управе опровергли, фото из 2021 года"></textarea>
+      </div>
+    </div>
+    <div class="modal__foot">
+      <button class="btn btn--quiet" type="button" data-close>Отмена</button>
+      <button class="btn btn--stop" type="submit">Не подтвердилось</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block data %}
+<script type="application/json" id="story-data">{{ page_data|tojson }}</script>
+{% endblock %}

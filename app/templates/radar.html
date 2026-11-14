@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import icon, status %}
+{% block title %}Радар{% endblock %}
+{% block content %}
+<div class="switcher" role="group" aria-label="Колонки радара">
+  <button type="button" data-show="col-feed" aria-pressed="true">Лента</button>
+  <button type="button" data-show="col-signals" aria-pressed="false">Сюжеты <span class="count" data-signal-count>{{ emerging|length }}</span></button>
+  <button type="button" data-show="col-work" aria-pressed="false">Зацепка и работа</button>
+</div>
+
+<div class="desk" data-desk>
+  {# ---------------------------------------------------------------- лента #}
+  <section class="pane is-shown" id="col-feed" aria-labelledby="feed-h">
+    <div class="pane__head">
+      <h2 id="feed-h">Лента чатов</h2>
+      <span class="count" data-feed-count></span>
+    </div>
+    <details class="hint" data-hint="radar">
+      <summary>{{ icon('help') }}Как пользоваться радаром</summary>
+      <ol>
+        <li>Лента — сообщения из домовых чатов MAX и Telegram, новые появляются сверху сами. Жёлтая полоса — уникальное и важное: первое сообщение с подробностями, не перепечатка.</li>
+        <li>Возможные сюжеты — похожие сообщения из разных чатов, собранные вместе. Нажмите «Исследовать»: AI начнёт поиск, а вы попадёте на рабочую страницу сюжета.</li>
+        <li>Своя зацепка — если вы узнали о событии не из чатов. Ниже — сюжеты, которые сейчас в работе.</li>
+      </ol>
+    </details>
+    <div class="pane__head" style="padding-top:0">
+      <div class="feed-tools" role="group" aria-label="Фильтр ленты">
+        <button class="chip" type="button" data-filter="all" aria-pressed="true">Все</button>
+        <button class="chip" type="button" data-filter="unique" aria-pressed="false">Уникальные</button>
+        <button class="chip" type="button" data-filter="important" aria-pressed="false">Важные</button>
+        <button class="chip" type="button" data-filter="phone" aria-pressed="false">С телефоном</button>
+        <button class="chip" type="button" data-filter="max" aria-pressed="false">MAX</button>
+        <button class="chip" type="button" data-filter="telegram" aria-pressed="false">Telegram</button>
+      </div>
+    </div>
+    <div class="pane__body pane__body--flush" data-feed-scroll>
+      <button class="feed-new" type="button" data-feed-new></button>
+      <ol class="feed" data-feed aria-live="polite" aria-relevant="additions"></ol>
+      <p class="feed-empty" data-feed-empty hidden>Пока тихо. Сообщения из подключённых чатов появятся здесь сами — или перезапустите демо-поток в разделе <a href="/sources">Источники</a>.</p>
+    </div>
+  </section>
+
+  {# ---------------------------------------------------------------- возникающие сюжеты #}
+  <section class="pane" id="col-signals" aria-labelledby="sig-h">
+    <div class="pane__head">
+      <h2 id="sig-h">Возможные сюжеты</h2>
+      <span class="count" data-signal-count>{{ emerging|length }}</span>
+    </div>
+    <div class="pane__body">
+      <ol class="signals" data-signals></ol>
+      <div class="empty" data-signals-empty hidden>
+        <b>Сюжетов пока нет</b>
+        Карточка появится, когда о похожем напишут хотя бы три сообщения. Если знаете о событии сами — заведите свою зацепку.
+      </div>
+    </div>
+  </section>
+
+  {# ---------------------------------------------------------------- зацепка + в работе #}
+  <div class="stack" id="col-work">
+    <section class="pane" aria-labelledby="lead-h">
+      <div class="pane__head"><h2 id="lead-h">Своя зацепка</h2></div>
+      <div class="pane__body">
+        <form class="lead-form" method="post" action="/stories/new" data-lead-form>
+          <div class="field">
+            <label for="lead">Что известно</label>
+            <textarea class="input" id="lead" name="lead_text" required minlength="3" placeholder="Где, когда, что видели. Например: на Варшавке у дома 12 горит машина"></textarea>
+          </div>
+          {% if channels %}
+          <div class="field">
+            <label for="lead-ch">Стиль черновика</label>
+            <select class="input" id="lead-ch" name="channel_id">
+              <option value="">Без канала</option>
+              {% for c in channels %}<option value="{{ c.id }}" {{ 'selected' if loop.first }}>{{ c.name }}</option>{% endfor %}
+            </select>
+          </div>
+          {% endif %}
+          <div class="btn-row">
+            <button class="btn btn--primary" type="submit">{{ icon('search') }}Исследовать зацепку</button>
+            <button class="btn btn--quiet" type="button" data-fill-example>Подставить пример</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section class="pane pane--grow" aria-labelledby="work-h">
+      <div class="pane__head"><h2 id="work-h">В работе</h2><span class="count">{{ in_work|length }}</span></div>
+      <div class="pane__body">
+        {% if in_work %}
+        <ul class="inwork" data-inwork>
+          {% for s in in_work %}
+          {% set p = s.progress_json or {} %}
+          <li data-story="{{ s.id }}">
+            <a href="/stories/{{ s.id }}">
+              <div class="inwork__title">{{ s.title }}</div>
+              <div class="inwork__meta">{{ status(s.status) }}<span class="t">{{ s.updated_at|dt('time') }}</span></div>
+              {% if s.status|ev == 'researching' %}<div class="bar"><i style="width: {{ p.percent or 3 }}%"></i></div>{% endif %}
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty" style="padding:8px 0"><b>Ничего в работе</b>Возьмите возможный сюжет из средней колонки или заведите свою зацепку.</div>
+        {% endif %}
+        {% if recent_done %}
+        <h3 class="muted" style="font-size:14px;margin:16px 0 4px">Недавно закрыты</h3>
+        <ul class="inwork">
+          {% for s in recent_done %}
+          <li><a href="/stories/{{ s.id }}"><div class="inwork__title">{{ s.title }}</div><div class="inwork__meta">{{ status(s.status) }}<span class="t">{{ s.updated_at|dt }}</span></div></a></li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block data %}
+<script type="application/json" id="radar-data">{{ {"feed": feed, "emerging": emerging, "demo": demo, "demo_lead": demo_lead}|tojson }}</script>
+{% endblock %}

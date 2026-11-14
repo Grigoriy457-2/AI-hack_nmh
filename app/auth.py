@@ -1,13 +1,12 @@
-"""Cookie-сессия (itsdangerous) и зависимости ролей.
+"""Cookie-сессия (itsdangerous). Ролей нет (ТЗ v2): все пользователи — редакторы.
 
 Использование в роутерах::
 
     user: User = Depends(current_user)                         # любой залогиненный
-    user: User = Depends(require_role(Role.producer))          # producer (+ operator всегда)
     user: User | None = Depends(current_user_optional)         # страницы без обязательного входа
 
 Неавторизованный запрос → HTTP 401. В app/main.py есть обработчик: для путей не под /api
-401 превращается в редирект на /login. Нет прав → 403.
+401 превращается в редирект на /login.
 """
 from __future__ import annotations
 
@@ -19,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_session
-from app.models import Role, User
+from app.models import User
 
 COOKIE_NAME = "nf_session"
 _serializer = URLSafeTimedSerializer(settings.SECRET_KEY, salt="newsflow-session")
@@ -75,21 +74,3 @@ async def current_user(user: User | None = Depends(current_user_optional)) -> Us
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Требуется вход")
     return user
-
-
-def has_role(user: User | None, *roles: Role) -> bool:
-    """AI-оператор проходит любую проверку роли."""
-    if user is None:
-        return False
-    return user.role == Role.operator or user.role in roles
-
-
-def require_role(*roles: Role):
-    """Фабрика зависимостей: пропускает указанные роли и всегда — Role.operator."""
-
-    async def _dep(user: User = Depends(current_user)) -> User:
-        if not has_role(user, *roles):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Недостаточно прав для этой роли")
-        return user
-
-    return _dep

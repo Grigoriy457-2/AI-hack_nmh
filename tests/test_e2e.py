@@ -1,111 +1,114 @@
-"""E2E: полный демо-сценарий DoD (п.11 ТЗ) одним тестом — вход через настоящий логин, API + страницы.
+"""E2E v2: полный путь редактора одним тестом (ASGI, настоящий логин, API + страницы).
 
-producer → исследование (≥2 итерации) → справка с источниками, дубли свёрнуты, «Кому позвонить»
-с телефонами → передать редактору → редактор правит (diff) → SMM публикует → продюсер «норм» →
-AI-оператор видит всё на доске и в метриках.
+Вход → Радар (лента MAX + Telegram, бейджи, кросс-платформенный дубль) → возникающий сюжет →
+«Исследовать» → справка в review (источники, «Кому позвонить» с телефонами) → «Копать глубже» с
+вопросом → правка черновика (diff) → отметки фактов → «Передать дальше» (предупреждения, кому/куда)
+→ статистика, SSE story_update, повторная передача 409.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from nf_helpers import CHERTANOVO_LEAD, REPORT_SECTION_KEYS, assert_clean_html, check, data, require_pipeline
+from nf_helpers import REPORT_SECTION_KEYS, TG_LIVE_TEXT, assert_clean_html, check, data, parse_sse
 
 pytestmark = pytest.mark.e2e
 
 
-async def _login(make_client, users, login):
-    c = make_client(None)
-    me = data(await c.post("/api/auth/login", json={"user_id": users[login], "password": "demo"}))
-    assert me["login"] == login
-    return c
+async def test_full_editor_path(make_client, users):
+    E = make_client(None)
+    # 0. вход одной кнопкой «Войти как редактор»
+    assert "Войти как редактор" in assert_clean_html(await E.get("/login"))
+    r = check(await E.post("/login", data={"password": "demo"}), 303)
+    assert r.headers["location"] == "/"
+    me = data(await E.get("/api/me"))
+    assert me["login"] == "editor"
 
+    # 1. подключаем публичный Telegram-канал (страница «Источники»)
+    check(await E.post("/sources/add", data={"platform": "telegram", "ref": "https://t.me/moscow_live_demo"}), 303)
+    assert "Москва Live" in assert_clean_html(await E.get("/sources"))
 
-async def test_full_demo_scenario(make_client, users):
-    require_pipeline()
-    P = await _login(make_client, users, "producer")
-    E = await _login(make_client, users, "editor")
-    SM = await _login(make_client, users, "smm")
-    O = await _login(make_client, users, "operator")
+    # 2. Радар: лента MAX + Telegram, кросс-платформенный дубль, возникающий сюжет
+    assert_clean_html(await E.get("/"))
+    feed = data(await E.get("/api/feed", params={"limit": 500}))
+    items = feed["items"]
+    assert {m["platform"] for m in items} == {"max", "telegram"}
+    live = [m for m in items if m["text"] == TG_LIVE_TEXT]
+    tg_live = next(m for m in live if m["platform"] == "telegram")
+    assert all(m["badges"]["duplicate_of"] == tg_live["id"] for m in live if m["platform"] == "max")
+    cards = data(await E.get("/api/emerging"))
+    card = cards[0]
+    assert set(card["platforms"]) == {"max", "telegram"} and card["messages_count"] >= 3
+    assert tg_live["id"] in card["message_ids"]
 
-    # 1. продюсер: новая зацепка (страница) + запуск
-    assert_clean_html(await P.get("/investigations/new"))
-    channel = data(await P.get("/api/channels"))[0]
-    inv = data(await P.post("/api/investigations", json={
-        "lead_text": CHERTANOVO_LEAD, "channel_id": channel["id"], "autorun": True}), 201)
+    # 3. «Исследовать» -> сюжет из кластера, пайплайн (inline) -> review
+    inv = data(await E.post(f"/api/emerging/{card['key']}/investigate"), 201)
     iid = inv["id"]
-    assert inv["status"] == "report_ready"
+    assert inv["origin"] == "emerging" and inv["status"] == "review" and inv["signal_at"] == card["first_at"]
+    html = assert_clean_html(await E.get(f"/stories/{iid}"))
+    for label in ("Копать глубже", "Передать дальше", "Кому позвонить"):
+        assert label in html
+    prog = data(await E.get(f"/api/stories/{iid}/progress"))
+    assert prog["progress"]["state"] == "done" and len(prog["iterations"]) >= 2
+    rep = data(await E.get(f"/api/stories/{iid}/report"))["report_json"]
+    assert [s["key"] for s in rep["sections"]] == REPORT_SECTION_KEYS
+    sources = data(await E.get(f"/api/stories/{iid}/sources"))
+    assert any(s["duplicates_count"] > 0 for s in sources), "дубли свёрнуты"
+    contacts = data(await E.get(f"/api/stories/{iid}/contacts"))
+    assert any(c["phone"] for c in contacts) and "tel:" in html
+    assert card["key"] in {c["key"] for c in data(await E.get("/api/emerging"))
+                           if c["investigation_id"] == iid}
 
-    # 2. цепочка поиска ≥2 итераций, прогресс done
-    prog = data(await P.get(f"/api/investigations/{iid}/progress"))
-    assert prog["progress"]["state"] == "done"
-    assert len(prog["iterations"]) >= 2
+    # 4. «Копать глубже» с вопросом -> снова review, черновик v+1
+    v_before = max(d["version"] for d in data(await E.get(f"/api/stories/{iid}/drafts")))
+    deeper = data(await E.post(f"/api/stories/{iid}/deeper", json={"question": "Есть ли записи камер у подъезда"}))
+    assert deeper["status"] == "review"
+    drafts = data(await E.get(f"/api/stories/{iid}/drafts"))
+    assert drafts[-1]["version"] == v_before + 1 and drafts[-1]["author_kind"] == "ai"
+    queries = [q["query"] for it in data(await E.get(f"/api/stories/{iid}/iterations")) for q in it["queries_json"]]
+    assert any("камер" in q for q in queries)
 
-    # 3. справка с источниками, дубли свёрнуты, контакты с телефонами
-    rep = data(await P.get(f"/api/investigations/{iid}/report"))["report_json"]
-    # порядок разделов строго проверяется в test_pipeline; здесь — состав, чтобы сценарий шёл дальше
-    assert sorted(s["key"] for s in rep["sections"]) == sorted(REPORT_SECTION_KEYS)
-    sources = data(await P.get(f"/api/investigations/{iid}/sources"))
-    src_ids = {s["id"] for s in sources}
-    used = {i for s in rep["sections"] for it in s.get("items", []) for i in it.get("source_ids", [])}
-    assert used and used <= src_ids
-    assert any(s["duplicates_count"] > 0 for s in sources), "дубли не свёрнуты"
-    contacts = data(await P.get(f"/api/investigations/{iid}/contacts"))
-    assert any(c["phone"] for c in contacts)
-    html = assert_clean_html(await P.get(f"/investigations/{iid}", params={"tab": "contacts"}))
-    phone = next(c["phone"] for c in contacts if c["phone"])
-    assert "tel:" in html and phone.replace(" ", "")[-4:] in html.replace(" ", "")
-    assert_clean_html(await P.get(f"/investigations/{iid}", params={"tab": "report"}))
+    # 5. правка черновика -> diff с AI-версией
+    ai = drafts[-1]
+    claim = ai["claims_json"][0]
+    edited_body = ai["body"] + "\n\nРедакция уточняет детали."
+    ed = data(await E.post(f"/api/stories/{iid}/drafts", json={"title": ai["title"], "body": edited_body}), 201)
+    assert ed["author_kind"] == "editor" and ed["claims_json"] == ai["claims_json"]
+    diff = data(await E.get(f"/api/stories/{iid}/drafts/diff"))
+    assert diff["base_version"] == ai["version"] and diff["target_version"] == ed["version"]
+    assert any(o["op"] == "insert" and "уточняет" in o["b"] for o in diff["ops"])
 
-    # продюсер отмечает факт
-    draft_v1 = data(await P.get(f"/api/investigations/{iid}/drafts"))[0]
-    claim = draft_v1["claims_json"][0]
-    data(await P.post(f"/api/investigations/{iid}/facts", json={
-        "fact_text": claim["text"], "state": "confirmed", "claim_id": claim["id"]}), 201)
+    # 6. проверка фактов и передача дальше (с SSE story_update параллельно)
+    chk = data(await E.get(f"/api/stories/{iid}/handoff/check"))
+    assert chk["has_report"] and chk["has_draft"]
+    data(await E.post(f"/api/stories/{iid}/facts", json={
+        "fact_text": claim["text"], "state": "confirmed", "claim_id": claim["id"], "comment": "дозвонились"}), 201)
+    chk2 = data(await E.get(f"/api/stories/{iid}/handoff/check"))
+    assert claim["id"] not in {u["id"] for u in chk2["unconfirmed"]}
 
-    # 4. передать на редактуру
-    out = data(await P.post(f"/api/investigations/{iid}/transition",
-                            json={"to_status": "editing", "editor_id": users["editor"]}))
-    assert out["status"] == "editing"
+    E2 = make_client("editor2")
 
-    # 5. редактор правит, видно diff
-    queue = {x["id"] for x in data(await E.get("/api/investigations"))}
-    assert iid in queue
-    assert_clean_html(await E.get(f"/investigations/{iid}/edit"))
-    edited = draft_v1["body"] + "\n\nОбновление: на месте работают экстренные службы."
-    d2 = data(await E.post(f"/api/investigations/{iid}/drafts",
-                           json={"title": draft_v1["title"], "body": edited}), 201)
-    assert d2["version"] == 2
-    diff = data(await E.get(f"/api/investigations/{iid}/drafts/diff"))
-    assert diff["ratio"] < 1 and any(o["op"] != "equal" for o in diff["ops"])
-    edit_html = assert_clean_html(await E.get(f"/investigations/{iid}/edit"))
-    assert "экстренные службы" in edit_html
-    check(await E.post(f"/api/investigations/{iid}/transition", json={"to_status": "ready"}))
+    async def do_handoff():
+        await asyncio.sleep(0.4)
+        return data(await E.post(f"/api/stories/{iid}/handoff", json={
+            "to": "Ночная смена сайта", "channel": "site", "comment": "по камерам — завтра"}))
 
-    # 6. SMM публикует
-    smm_list = {x["id"] for x in data(await SM.get("/api/investigations"))}
-    assert iid in smm_list
-    assert_clean_html(await SM.get("/"))
-    out = data(await SM.post(f"/api/investigations/{iid}/transition", json={"to_status": "published"}))
-    assert out["status"] == "published"
+    stream, ho = await asyncio.gather(E2.get("/api/stream", params={"timeout": 2}), do_handoff())
+    assert ho["story"]["status"] == "handed_off" and ho["story"]["handoff_to"] == "Ночная смена сайта"
+    assert ho["warnings"] == chk2["warnings"]
+    upd = [e["data"] for e in parse_sse(stream.text) if e["event"] == "story_update" and e["data"]["id"] == iid]
+    assert upd and upd[-1]["status"] == "handed_off"
+    check(await E2.post(f"/api/stories/{iid}/handoff", json={"to": "ТВ", "channel": "tv"}), 409)
 
-    # 7. продюсер: «норм»
-    data(await P.post(f"/api/investigations/{iid}/feedback", json={"verdict": "good", "comment": "норм"}), 201)
-    assert_clean_html(await P.get("/feedback"))
-
-    # 8. AI-оператор: доска, метрики, фидбэк
-    board = data(await O.get("/api/operator/board"))
-    assert iid in {c["id"] for c in board["columns"]["published"]}
-    m = data(await O.get("/api/metrics"))
-    assert m["investigations_total"] >= 1 and m["by_status"]["published"] >= 1
-    assert m["feedback_total"] >= 1 and m["feedback_good_share"] is not None
-    assert m["time_to_draft_avg_sec"] is not None and m["time_to_draft_avg_sec"] >= 0
-    assert m["traceability"] is not None and m["traceability"] > 0
-    assert m["draft_acceptance_rate"] is not None
-    fb = data(await O.get("/api/feedback"))
-    assert any(f["investigation_id"] == iid and f["verdict"] == "good" for f in fb)
-    op_html = assert_clean_html(await O.get("/operator"))
-    assert inv["title"][:20] in op_html
-
-    hist = data(await O.get(f"/api/investigations/{iid}/history"))
-    assert [h["to_status"] for h in hist] == ["new", "researching", "report_ready", "editing", "ready",
-                                             "published"]
+    # 7. итог: история, страница, статистика
+    hist = [(h["from_status"], h["to_status"]) for h in data(await E.get(f"/api/stories/{iid}/history"))]
+    assert hist == [(None, "new"), ("new", "researching"), ("researching", "review"),
+                    ("review", "researching"), ("researching", "review"), ("review", "handed_off")]
+    page = assert_clean_html(await E.get(f"/stories/{iid}"))
+    assert "Ночная смена сайта" in page and "Передано дальше" in page
+    st = data(await E.get("/api/stats"))
+    assert st["recent_handoffs"][0]["id"] == iid and st["handoffs_by_channel"]["site"] >= 1
+    assert st["recent_handoffs"][0]["signal_to_handoff_sec"] > 0
+    assert_clean_html(await E.get("/stats"))
+    assert_clean_html(await E.get("/stories", params={"status": "handed_off"}))

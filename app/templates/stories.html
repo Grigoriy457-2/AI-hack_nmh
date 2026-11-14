@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import status as status_chip %}
+{% block title %}Сюжеты{% endblock %}
+{% block content %}
+<div class="wrap">
+  <div class="page-title">
+    <h1>Сюжеты</h1>
+    <form method="get" action="/stories" role="search" style="display:flex;gap:6px">
+      {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+      <label class="sr-only" for="sq">Поиск по сюжетам</label>
+      <input class="input" id="sq" name="q" value="{{ q }}" placeholder="Поиск по названию и зацепке" style="width:240px;max-width:100%">
+      <button class="btn" type="submit">Найти</button>
+    </form>
+  </div>
+  <div class="filters" style="margin:0 4px 14px" aria-label="Фильтр по статусу">
+    <a class="chip" href="/stories{{ '?q=' ~ q|urlencode if q }}" aria-pressed="{{ 'true' if not status else 'false' }}" style="display:inline-flex;align-items:center;text-decoration:none">Все <span class="count" style="margin-left:6px">{{ total }}</span></a>
+    {% for s in STATUS_ORDER %}
+    <a class="chip" href="/stories?status={{ s|ev }}{{ '&q=' ~ q|urlencode if q }}" aria-pressed="{{ 'true' if status == s|ev else 'false' }}" style="display:inline-flex;align-items:center;text-decoration:none">{{ s|status_label }} <span class="count" style="margin-left:6px">{{ counts.get(s|ev, 0) }}</span></a>
+    {% endfor %}
+  </div>
+  <div class="pane">
+    {% if stories %}
+    <table class="table">
+      <thead><tr><th>Сюжет</th><th>Статус</th><th>Откуда</th><th class="num">Первый сигнал</th><th class="num">Обновлён</th></tr></thead>
+      <tbody>
+        {% for s in stories %}
+        <tr>
+          <td><a class="row-link" href="/stories/{{ s.id }}">{{ s.title }}</a>
+            {% if (s.status|ev) == 'handed_off' and s.handoff_to %}<div class="muted" style="font-size:13px">Передано: {{ s.handoff_to }}{% if s.handoff_channel %}, {{ HANDOFF_CHANNELS.get(s.handoff_channel, s.handoff_channel) }}{% endif %}</div>{% endif %}</td>
+          <td>{{ status_chip(s.status) }}</td>
+          <td class="muted">{{ 'возможный сюжет' if (s.origin|ev) == 'emerging' else 'своя зацепка' }}</td>
+          <td class="num">{{ s.signal_at|dt if s.signal_at else '—' }}</td>
+          <td class="num">{{ s.updated_at|ago }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty"><b>{% if q or status %}Ничего не нашлось{% else %}Сюжетов пока нет{% endif %}</b>{% if q or status %}Сбросьте фильтр или измените запрос.{% else %}Возьмите возможный сюжет на <a href="/">радаре</a> или заведите свою зацепку.{% endif %}</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

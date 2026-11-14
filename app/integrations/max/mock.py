@@ -61,11 +61,19 @@ class MockMaxClient(MaxClient):
 
     name = "mock"
 
-    def __init__(self, now: datetime | None = None, *, include_future: bool = False) -> None:
+    def __init__(self, now: datetime | None = None, *, include_future: bool = False,
+                 stream: bool | None = None) -> None:
         """``now`` — зафиксировать «текущее» время (тесты); ``include_future`` — отдавать и
-        сообщения, которые по смещению ещё «не написаны»."""
+        сообщения, которые по смещению ещё «не написаны».
+        ``stream`` — демо-трикл (``demo_stream``): None = settings.DEMO_STREAM_ENABLED; при явном
+        ``now``/``include_future`` трикл выключен (детерминированный режим v1)."""
         self._now = now
         self._include_future = include_future
+        if stream is None:
+            from app.config import settings
+
+            stream = bool(settings.DEMO_STREAM_ENABLED) and now is None and not include_future
+        self.streaming = bool(stream)
 
     def _current(self) -> datetime:
         return self._now or utcnow()
@@ -76,8 +84,15 @@ class MockMaxClient(MaxClient):
         return mock_data.scenario_event_time(self._now) if self._now else mock_data.scenario_event_time()
 
     def all_messages(self) -> list[MaxMessage]:
-        now, anchor = self._current(), self.anchor()
         names = {k: v.get("name") for k, v in mock_data.SCENARIO_MAX_PROFILES.items()}
+        if self.streaming:
+            from app.integrations.max import demo_stream
+
+            now = utcnow()
+            msgs = [_norm_message(m, now, names) for m in demo_stream.released(now)]
+            msgs.sort(key=lambda m: (m.sent_at, m.external_id))
+            return msgs
+        now, anchor = self._current(), self.anchor()
         msgs = [_norm_message(m, anchor, names) for m in mock_data.SCENARIO_MAX_MESSAGES]
         if not self._include_future:
             msgs = [m for m in msgs if m.sent_at <= now]

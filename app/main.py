@@ -42,10 +42,10 @@ def _start_poller() -> asyncio.Task | None:
     if not settings.MAX_POLLER_ENABLED:
         return None
     try:
-        from app.integrations.max.poller import start_poller
+        from app.integrations.max.poller import effective_interval, start_poller
 
         task = start_poller(settings.MAX_POLL_INTERVAL)
-        log.info("MAX poller started (every %ss)", settings.MAX_POLL_INTERVAL)
+        log.info("Sources poller started (every %ss)", effective_interval())
         return task
     except NotImplementedError:
         log.warning("MAX poller not implemented yet — skipped")
@@ -54,14 +54,47 @@ def _start_poller() -> asyncio.Task | None:
     return None
 
 
+def _start_telegram() -> list[asyncio.Task]:
+    """Telegram: listener + sync (пакет DEV-TELEGRAM). Только вместе с поллером (в тестах выключен)."""
+    if not (settings.TG_ENABLED and settings.MAX_POLLER_ENABLED):
+        return []
+    try:
+        from app.integrations.max.poller import set_telegram_runner_active
+        from app.integrations.telegram.runner import start_telegram_sync
+
+        tasks = start_telegram_sync()
+        set_telegram_runner_active(True)
+        return tasks
+    except ImportError:
+        log.info("Telegram package not available — skipped")
+    except Exception:  # noqa: BLE001
+        log.exception("Telegram source failed to start")
+    return []
+
+
+async def _stop_telegram(tasks: list[asyncio.Task]) -> None:
+    if not tasks:
+        return
+    try:
+        from app.integrations.max.poller import set_telegram_runner_active
+        from app.integrations.telegram.runner import stop_telegram_sync
+
+        set_telegram_runner_active(False)
+        await stop_telegram_sync(tasks)
+    except Exception:  # noqa: BLE001
+        log.exception("Telegram stop failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
     await _seed()
     poller = _start_poller()
+    tg_tasks = _start_telegram()
     try:
         yield
     finally:
+        await _stop_telegram(tg_tasks)
         if poller is not None:
             poller.cancel()
             try:
@@ -72,7 +105,7 @@ async def lifespan(app: FastAPI):
 
 
 _DEFAULT_ERROR_MESSAGES = {
-    403: "У вашей роли нет доступа к этой странице.",
+    403: "Нет доступа к этой странице.",
     404: "Страница или объект не найдены.",
 }
 
