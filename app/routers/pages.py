@@ -56,7 +56,7 @@ FACT_STATE_LABELS = {"confirmed": "подтверждён", "unconfirmed": "не
 REPORT_FACT_SECTIONS = {"timeline", "facts", "confirmed", "unconfirmed", "contradictions", "to_verify"}
 
 DEMO_LEAD = (
-    "В домовых чатах Чертанова пишут, что около 14:30 у жилого дома на Варшавском шоссе "
+    "В чатах Чертанова пишут, что около 14:30 у жилого дома на Варшавском шоссе "
     "был громкий хлопок. Жильцы говорят про запах гари и выбитые стёкла на 3-м этаже, "
     "кто-то видел скорую и пожарных. Официальной информации пока нет."
 )
@@ -162,6 +162,37 @@ def host_of(url: Any) -> str:
         return str(url)
 
 
+_TG_POST = re.compile(r"^/(?:s/)?[\w\d_]+/\d+/?$")
+
+
+def link_label(url: Any, platform: Any = None, link_kind: Any = None) -> str | None:
+    """Подпись ссылки на источник. Telegram/MAX: пост → «Открыть пост в …», канал → «Открыть канал».
+    Сайты/RSS — домен издания. Нет http(s)-ссылки → None (ссылку не рисуем)."""
+    u = safe_url(url)
+    if not u:
+        return None
+    try:
+        parts = urlsplit(u)
+    except ValueError:
+        return None
+    host = parts.netloc.lower().removeprefix("www.")
+    p = str(ev(platform) or "").lower()
+    if not p or p in ("web", "official", "media", "max_chat"):
+        p = "telegram" if host in ("t.me", "telegram.me") else "max" if host.endswith("max.ru") else p
+    kind = str(ev(link_kind) or "").lower()
+    if p in ("telegram", "max"):
+        if not kind:
+            path = parts.path
+            if p == "telegram":
+                kind = "post" if _TG_POST.match(path) else "chat"
+            else:
+                kind = "post" if len([s for s in path.split("/") if s]) >= 2 else "chat"
+        if kind == "post":
+            return "Открыть пост в Telegram" if p == "telegram" else "Открыть пост в MAX"
+        return "Открыть канал"
+    return host or None
+
+
 def tel_href(phone: Any) -> str:
     return "tel:" + re.sub(r"[^\d+]", "", str(phone or ""))
 
@@ -196,7 +227,8 @@ env.filters.update(dt=fmt_dt, ago=fmt_ago, dur=fmt_dur, pct=fmt_pct, ev=ev, stat
 env.globals.update(STATUS_LABELS=STATUS_LABELS, STATUS_ORDER=STATUS_ORDER, HANDOFF_CHANNELS=HANDOFF_CHANNELS,
                    PLATFORM_LABELS=PLATFORM_LABELS, PLATFORM_SHORT=PLATFORM_SHORT, KIND_LABELS=KIND_LABELS,
                    SOURCE_KIND_LABELS=SOURCE_KIND_LABELS, AGENT_LABELS=AGENT_LABELS,
-                   FACT_STATE_LABELS=FACT_STATE_LABELS, plural=plural, asset=asset, APP_NAME=settings.APP_NAME)
+                   FACT_STATE_LABELS=FACT_STATE_LABELS, plural=plural, asset=asset, APP_NAME=settings.APP_NAME,
+                   link_label=link_label)
 
 
 # ================================================================ helpers
@@ -246,8 +278,17 @@ async def _data_mode() -> dict[str, Any] | None:
         is_demo = data.get("data_mode") == "demo"
         llm = data.get("llm")
         data["ui_label"] = "Демо-данные" if is_demo else "Реальные данные"
-        data["ui_ai"] = "AI-анализ" if llm == "anthropic" else ("Без AI: только цитаты" if llm == "extractive"
-                                                               else "AI-заглушка (демо)" if llm == "mock" else None)
+        llm_s = str(llm or "").lower()
+        if llm_s == "extractive":
+            data["ui_ai"], data["llm_kind"] = "Без AI: только цитаты", "extractive"
+        elif llm_s == "mock":
+            data["ui_ai"], data["llm_kind"] = "AI-заглушка (демо)", "mock"
+        elif llm_s:
+            # v4: LLM — Grok (xAI); любые другие провайдеры показываем как «AI-анализ»
+            data["ui_ai"] = "AI-анализ (Grok)" if ("grok" in llm_s or "xai" in llm_s) else "AI-анализ"
+            data["llm_kind"] = "llm"
+        else:
+            data["ui_ai"], data["llm_kind"] = None, None
         data["is_demo"] = is_demo
     _MODE_CACHE.update(at=now, data=data)
     return data
@@ -334,7 +375,8 @@ async def radar(request: Request, user: Any = Depends(current_user), session: As
     emerging = await emerging_svc.compute_emerging(session)
     all_stories = await stories_svc.list_stories(session)
     in_work = [s for s in all_stories if s.status in ACTIVE_STATUSES]
-    recent_done = [s for s in all_stories if s.status not in ACTIVE_STATUSES][:4]
+    # архив (rejected) на радаре не показываем
+    recent_done = [s for s in all_stories if ev(s.status) == "handed_off"][:4]
     ctx = {
         "feed": jsonable_encoder(feed), "emerging": jsonable_encoder(emerging),
         "in_work": in_work, "recent_done": recent_done, "channels": await _channels(session),
@@ -377,16 +419,30 @@ async def emerging_investigate_form(key: str, user: Any = Depends(current_user),
 # ================================================================ Сюжеты (список)
 @router.get("/stories", response_class=HTMLResponse)
 async def stories_list(request: Request, status: str | None = None, q: str | None = None,
+                       archived: str | None = None,
                        user: Any = Depends(current_user), session: AsyncSession = Depends(get_session)):
+    """«В работе» (по умолчанию: всё, кроме rejected) и «Архив» (?archived=1: rejected)."""
     from app.services import stories as stories_svc
 
-    all_stories = await stories_svc.list_stories(session, q=(q or None))
+    all_stories = list(await stories_svc.list_stories(session, q=(q or None)))
+    try:  # v4: сервис может прятать архив по умолчанию — добираем его явно
+        seen = {s.id for s in all_stories}
+        all_stories += [s for s in await stories_svc.list_stories(session, q=(q or None), archived=True)
+                        if s.id not in seen]
+    except TypeError:
+        pass
+    all_stories.sort(key=lambda s: s.updated_at or datetime.min, reverse=True)
+    is_archive = archived in ("1", "true", "yes")
+    active_list = [s for s in all_stories if ev(s.status) != "rejected"]
+    archive_list = [s for s in all_stories if ev(s.status) == "rejected"]
+    pool = archive_list if is_archive else active_list
     counts = defaultdict(int)
-    for s in all_stories:
+    for s in active_list:
         counts[ev(s.status)] += 1
-    st = status if status in {ev(x) for x in STATUS_ORDER} else None
-    items = [s for s in all_stories if st is None or ev(s.status) == st]
-    ctx = {"stories": items, "counts": dict(counts), "total": len(all_stories), "status": st, "q": q or ""}
+    st = status if not is_archive and status in {ev(x) for x in STATUS_ORDER if ev(x) != "rejected"} else None
+    items = [s for s in pool if st is None or ev(s.status) == st]
+    ctx = {"stories": items, "counts": dict(counts), "total": len(active_list), "archive_total": len(archive_list),
+           "is_archive": is_archive, "status": st, "q": q or ""}
     return await _render(request, "stories.html", ctx, user=user, session=session, nav_active="stories")
 
 
@@ -482,7 +538,8 @@ async def story_page(request: Request, inv_id: int, user: Any = Depends(current_
     report = rep.report_json if rep else None
     sctx = await _sources_ctx(session, inv_id)
     try:
-        contacts = await stories_svc.list_contacts(session, inv_id)
+        # v4: «Кому позвонить» — только авторы с открытым телефоном
+        contacts = [c for c in await stories_svc.list_contacts(session, inv_id) if getattr(c, "phone", None)]
     except Exception:  # noqa: BLE001
         log.exception("list_contacts failed")
         contacts = []

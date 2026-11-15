@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "partials/_macros.html" import icon, status as status_chip, platform, plate %}
 {% block title %}{{ inv.title }}{% endblock %}
-{% block body_class %}{% if status != 'handed_off' %} has-actionbar{% endif %}{% endblock %}
+{% block body_class %}{% if status not in ('handed_off', 'rejected') %} has-actionbar{% endif %}{% endblock %}
 
 {% macro src_refs(ids) -%}
 {%- if ids -%}<span class="fact__src">{% for sid in ids %}{% if source_num.get(sid) %}<button type="button" class="src-ref" data-src="{{ sid }}" title="Источник {{ source_num[sid] }}">{{ source_num[sid] }}</button>{% endif %}{% endfor %}</span>{%- endif -%}
@@ -22,7 +22,7 @@
     <h1>{{ inv.title }}</h1>
     <p class="story-head__lead" title="Нажмите, чтобы раскрыть зацепку целиком" onclick="this.classList.toggle('is-open')">{{ inv.lead_text }}</p>
   </div>
-  {% if status != 'handed_off' %}<div class="actionbar" data-actions>
+  {% if status not in ('handed_off', 'rejected') %}<div class="actionbar" data-actions>
     {% if status == 'new' %}
       <button class="btn btn--stop" type="button" data-open="dlg-reject">{{ icon('x') }}Не подтвердилось</button>
       <button class="btn btn--primary" type="button" data-act="run">{{ icon('search') }}Исследовать</button>
@@ -44,9 +44,10 @@
   {% if inv.handoff_comment %}<br>Комментарий: {{ inv.handoff_comment }}{% endif %}
 </div>
 {% elif status == 'rejected' %}
-<div class="handoff-note is-rejected" style="margin: 0 4px var(--gap)">
+<div class="handoff-note is-rejected archive-note" style="margin: 0 4px var(--gap)">
   {% set ns = namespace(reason=None) %}{% for h in history %}{% if (h.to_status|ev) == 'rejected' and h.comment %}{% set ns.reason = h.comment %}{% endif %}{% endfor %}
-  Сюжет отмечен как «Не подтвердилось».{% if ns.reason %} Причина: {{ ns.reason }}{% endif %}
+  <span><b>В архиве.</b> Сюжет отмечен как «Не подтвердилось».{% if ns.reason %} Причина: {{ ns.reason }}{% endif %}</span>
+  <button class="btn btn--sm" type="button" data-act="reopen">Вернуть в работу</button>
 </div>
 {% endif %}
 
@@ -142,7 +143,7 @@
           </li>
           {% else %}
           <li class="fact" data-state="{{ 'confirmed' if sec.key == 'sources' else (st or 'confirmed') }}" style="border-left-color: var(--line)">
-            <div class="fact__text">{% if it.time %}<span class="fact__time">{{ it.time }}</span>{% endif %}{{ it.text }}{% if it.possibly_old %} <span class="badge badge--old">возможно старое фото</span>{% endif %}{{ src_refs(it.source_ids) }}{% if it.url|safe_url %} <a class="ext" href="{{ it.url }}" target="_blank" rel="noopener noreferrer">{{ it.url|host }}</a>{% endif %}</div>
+            <div class="fact__text">{% if it.time %}<span class="fact__time">{{ it.time }}</span>{% endif %}{{ it.text }}{% if it.possibly_old %} <span class="badge badge--old">возможно старое фото</span>{% endif %}{{ src_refs(it.source_ids) }}{% set ll = link_label(it.url, it.platform, it.link_kind) %}{% if ll %} <a class="ext" href="{{ it.url }}" target="_blank" rel="noopener noreferrer">{{ ll }}</a>{% endif %}</div>
           </li>
           {% endif %}
           {% endfor %}
@@ -240,17 +241,12 @@
             {% if c.chat_title %}{{ plate(c.chat_title) }}{% endif %}
             <span class="t muted">{{ c.sent_at|dt('time') }}</span>
           </div>
-          <p class="callee__quote">{{ c.quote }}{% if c.message_url|safe_url %} <a class="ext" href="{{ c.message_url }}" target="_blank" rel="noopener noreferrer">сообщение на {{ c.message_url|host }}</a>{% endif %}</p>
-          {% if c.phone %}
+          <p class="callee__quote">{{ c.quote }}{% set ll = link_label(c.message_url, c.platform|ev if c.platform is defined else None, c.link_kind if c.link_kind is defined else None) %}{% if ll %} <a class="ext" href="{{ c.message_url }}" target="_blank" rel="noopener noreferrer">{{ ll }}</a>{% endif %}</p>
           <a class="tel" href="{{ c.phone|tel }}">{{ icon('phone') }}{{ c.phone }}</a>
-          {% else %}
-          <span class="tel tel--none">Телефон скрыт в профиле{% if c.username %}, пишите @{{ c.username }}{% endif %}</span>
-          {% endif %}
         </div>
         {% else %}
-        <p class="muted" style="font-size:14px">{% if status in ('new', 'researching') %}Очевидцы появятся после поиска: это авторы первых уникальных сообщений с важными подробностями.{% else %}Среди источников нет очевидцев с уникальными важными сообщениями.{% endif %}</p>
+        <p class="muted" style="font-size:14px">{% if status in ('new', 'researching') %}Контакты появятся после поиска: авторы первых важных сообщений с открытым телефоном.{% else %}Контактов с открытым телефоном не найдено.{% endif %}</p>
         {% endfor %}
-        <p class="muted" style="font-size:12.5px;margin:10px 0 0">Телефоны берутся из открытых профилей авторов. Бот добавлен в чаты администраторами с согласия участников.</p>
       </div>
     </section>
 
@@ -270,7 +266,7 @@
           <div class="src__title">{% if s.url|safe_url %}<a href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.title or s.url|host }}</a>{% else %}{{ s.title or (msg.author_name if msg else 'Источник') }}{% endif %}</div>
           {% if s.snippet or msg %}<div class="src__snip">{{ (s.snippet or msg.text)|truncate(220) }}</div>{% endif %}
           <div class="src__meta">
-            {% if msg and chats_by_id.get(msg.chat_id) %}<span>{{ chats_by_id[msg.chat_id].title }}</span>{% endif %}{% if s.url|safe_url %}<a class="ext" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.url|host }}</a>{% endif %}
+            {% if msg and chats_by_id.get(msg.chat_id) %}<span>{{ chats_by_id[msg.chat_id].title }}</span>{% endif %}{% set ll = link_label(s.url, platform_of[s.id], s.link_kind if s.link_kind is defined else None) %}{% if ll %}<a class="ext" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ ll }}</a>{% endif %}
             <span class="t">{{ (s.published_at or (msg.sent_at if msg else None))|dt }}</span>
             {% if s.uniqueness_score is not none %}<span>уникальность {{ s.uniqueness_score|pct }}</span>{% endif %}
           </div>
@@ -327,7 +323,7 @@
       <div class="field">
         <span class="label">Канал</span>
         <div class="radios">
-          {% for k, v in HANDOFF_CHANNELS.items() %}<label><input type="radio" name="channel" value="{{ k }}" {{ 'checked' if loop.first }}>{{ v }}</label>{% endfor %}
+          {% set none_key = 'none' if 'none' in HANDOFF_CHANNELS else 'other' %}<label><input type="radio" name="channel" value="{{ none_key }}" checked>Без канала</label>{% for k, v in HANDOFF_CHANNELS.items() if k != none_key %}<label><input type="radio" name="channel" value="{{ k }}">{{ v }}</label>{% endfor %}
         </div>
       </div>
       <div class="field">
@@ -363,7 +359,7 @@
   <form method="dialog" data-reject-form>
     <div class="modal__head"><h2 id="dlg-reject-h">Не подтвердилось</h2><button class="icon-btn" type="button" data-close aria-label="Закрыть">{{ icon('x') }}</button></div>
     <div class="modal__body">
-      <p class="muted" style="font-size:14px">Сюжет уйдёт из работы. Вернуть его можно в любой момент.</p>
+      <p class="muted" style="font-size:14px">Сюжет уйдёт в архив. Вернуть его в работу можно в любой момент.</p>
       <div class="field">
         <label for="rc">Почему</label>
         <textarea class="input" id="rc" name="comment" rows="3" placeholder="Например: в управе опровергли, фото из 2021 года"></textarea>

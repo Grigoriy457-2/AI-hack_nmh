@@ -34,7 +34,7 @@
         <b>{{ data_mode.ui_label }}</b>
         {% if data_mode.is_demo %}<p>Сообщения, источники и ссылки синтетические: сценарий для показа без интернета.</p>
         {% else %}<p>Сообщения берутся из реальных публичных каналов и лент, ссылки ведут на настоящие страницы.</p>{% endif %}
-        {% if data_mode.ui_ai %}<p><b>{{ data_mode.ui_ai }}.</b> {% if data_mode.llm == 'extractive' %}Справка и черновик собираются из цитат найденных источников, без пересказа нейросетью.{% elif data_mode.llm == 'anthropic' %}Справку и черновик пишет нейросеть, каждое утверждение со ссылкой на источник.{% else %}Ответы AI заранее заготовлены для демо-сценария.{% endif %}</p>{% endif %}
+        {% if data_mode.ui_ai %}<p><b>{{ data_mode.ui_ai }}.</b> {% if data_mode.llm_kind == 'extractive' %}Справка и черновик собираются из цитат найденных источников, без пересказа нейросетью.{% elif data_mode.llm_kind == 'llm' %}Справку и черновик пишет нейросеть, каждое утверждение со ссылкой на источник.{% else %}Ответы AI заранее заготовлены для демо-сценария.{% endif %}</p>{% endif %}
         {% for n in data_mode.notes or [] %}<p class="muted">{{ n }}</p>{% endfor %}
         <dl class="kv">
           {% if data_mode.telegram_provider %}<dt>Telegram</dt><dd>{{ data_mode.telegram_provider }}</dd>{% endif %}

@@ -36,6 +36,7 @@ from app.models import (
     utcnow,
 )
 from app.schemas import EmergingStoryOut, FeedBadges, FeedMessage
+from app.services import links
 from app.services import uniqueness as uq
 
 ANALYSIS_LIMIT = 400
@@ -89,16 +90,12 @@ def _important(text: str, has_media: bool) -> bool:
 
 
 def message_url(m: ChatMessage, chat: MaxChat) -> str | None:
-    """Ссылка «открыть»: реальная ссылка сообщения; в live без неё — публичная страница источника
-    (t.me/<name>, max.ru/<name>) или None. Внутренние max://-ссылки — только DATA_MODE=demo."""
-    if m.message_url:
-        return m.message_url
-    if not settings.is_demo:
-        url = getattr(chat, "url", None)
-        return url if url and url.startswith("http") and (chat.platform or "max") != "rss" else None
-    if (chat.platform or "max") == "max":
-        return md.max_message_url(chat.external_id, m.external_id)
-    return f"{chat.platform}://chat/{chat.external_id}/{m.external_id}"
+    """Ссылка «открыть» (см. services.links): пост → чат/канал → None."""
+    return links.resolve(m, chat)[0]
+
+
+def link_kind(m: ChatMessage, chat: MaxChat) -> str:
+    return links.resolve(m, chat)[1]
 
 
 class _DSU:
@@ -272,7 +269,7 @@ def feed_message(info: MsgInfo, *, card_keys: set[str] | None = None) -> FeedMes
         chat_id=c.id, chat_title=c.title, district=c.district, author_name=m.author_name,
         author_external_id=m.author_external_id, text=m.text or "", sent_at=m.sent_at,
         has_media=bool(m.has_media), media_url=m.media_url, is_forwarded=bool(m.is_forwarded),
-        message_url=message_url(m, c),
+        message_url=message_url(m, c), link_kind=link_kind(m, c),
         badges=FeedBadges(
             unique=bool(r and r.is_primary and r.uniqueness_score >= uq.UNIQUE_THRESHOLD),
             important=bool(r and r.is_important),
@@ -293,7 +290,7 @@ def plain_feed_message(m: ChatMessage, c: MaxChat) -> FeedMessage:
         chat_title=c.title, district=c.district, author_name=m.author_name,
         author_external_id=m.author_external_id, text=m.text or "", sent_at=m.sent_at,
         has_media=bool(m.has_media), media_url=m.media_url, is_forwarded=bool(m.is_forwarded),
-        message_url=message_url(m, c),
+        message_url=message_url(m, c), link_kind=link_kind(m, c),
     )
 
 

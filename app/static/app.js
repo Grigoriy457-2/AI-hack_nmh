@@ -101,6 +101,25 @@
   var KIND_LABELS = { channel: 'канал', group: 'группа', chat: 'чат', user: 'пользователь', feed: 'лента новостей' };
   function hostOf(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } }
   function httpUrl(u) { return u && /^https?:\/\//i.test(u) ? u : null; }
+  // подпись ссылки на источник (= link_label в pages.py): пост / канал / домен издания
+  function linkLabel(u, platform, kind) {
+    var h = httpUrl(u);
+    if (!h) return null;
+    var host = hostOf(h), path = '';
+    try { path = new URL(h).pathname; } catch (e) { path = ''; }
+    var p = platform;
+    if (p !== 'telegram' && p !== 'max') p = (host === 't.me' || host === 'telegram.me') ? 'telegram' : /(^|\.)max\.ru$/.test(host) ? 'max' : p;
+    if (p === 'telegram' || p === 'max') {
+      if (!kind) {
+        kind = p === 'telegram'
+          ? (/^\/(?:s\/)?[\w]+\/\d+\/?$/.test(path) ? 'post' : 'chat')
+          : (path.split('/').filter(Boolean).length >= 2 ? 'post' : 'chat');
+      }
+      if (kind === 'post') return p === 'telegram' ? 'Открыть пост в Telegram' : 'Открыть пост в MAX';
+      return 'Открыть канал';
+    }
+    return host;
+  }
   function extLink(u, text, cls) {
     var h = httpUrl(u);
     if (!h) return '';
@@ -259,7 +278,7 @@
       if (b.has_phone) badges += '<span class="badge badge--phone">' + ICON.phone + 'есть телефон</span>';
       if (m.has_media) badges += '<span class="msg__media">' + ICON.image + 'фото</span>';
       if (m.is_forwarded) badges += '<span class="msg__media">' + ICON.fwd + 'переслано</span>';
-      var link = extLink(m.message_url, hostOf(m.message_url) === 't.me' ? 'открыть в Telegram' : hostOf(m.message_url));
+      var link = extLink(m.message_url, linkLabel(m.message_url, m.platform, m.link_kind));
       if (link) badges += link;
       var showAuthor = m.author_name && m.author_name !== m.chat_title;
       li.innerHTML =
@@ -579,7 +598,7 @@
       ev.preventDefault();
       var btn = $('[type=submit]', reject); busy(btn, true);
       api('POST', base + '/reject', { comment: reject.comment.value.trim() || null })
-        .then(function () { reloadWith('Сюжет отмечен: не подтвердилось'); })
+        .then(function () { reloadWith('Сюжет перенесён в архив'); })
         .catch(function (e) { busy(btn, false); toast(e.message, true); });
     });
 

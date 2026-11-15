@@ -25,7 +25,7 @@ run_investigation(id)``). Пайплайн открывает СВОИ сесс�
 черновики сохраняются, новый AI-черновик получает следующий номер версии.
 
 Реальные данные (TZ_v3, DATA_MODE=live): агенты ищут по Google News RSS + RSS-лентам СМИ/ведомств
-(+ Tavily/Serper по ключу) и по реальным сообщениям Telegram/MAX в БД; без ANTHROPIC_API_KEY анализ
+(+ Tavily/Serper по ключу) и по реальным сообщениям Telegram/MAX в БД; без XAI_API_KEY (Grok) анализ
 экстрактивный (``app.ai.extractive``): справка и черновик — только цитаты найденных источников с их
 source_id; ссылки — только из ответов источников (для сообщений без публичной ссылки url=None);
 медиа — только реальные (enclosure RSS, og:image, превью t.me). Сценарий «Чертаново» — только demo.
@@ -51,6 +51,7 @@ from app.ai import prompts
 from app.ai.llm import MockLLM, fallback_llm, get_llm
 from app.ai.text import first_sentence, hhmm_msk, stems
 from app.config import settings
+from app.services import links as _links
 from app.integrations.search import OFFICIAL_DOMAINS, SearchResult, get_search_provider, is_official_url
 from app.models import (
     AuthorProfile,
@@ -506,11 +507,13 @@ def _save_results(session: AsyncSession, ctx: PipelineContext, q: dict[str, str]
             if mid in ctx.seen_messages:
                 continue
             ctx.seen_messages.add(mid)
-            url = r.get("message_url") or (md.max_message_url(r["chat_external_id"], r["external_id"])
-                                           if settings.is_demo else None)  # live: ссылок не выдумываем
-            if url and url in ctx.seen_urls:
+            # ссылка на сам пост (t.me/<канал>/<id>, пост MAX), иначе — на чат/канал (link_kind=chat)
+            url, link_kind = r.get("link") or (r.get("message_url"), "post" if r.get("message_url") else "none")
+            if not url and settings.is_demo:
+                url, link_kind = md.max_message_url(r["chat_external_id"], r["external_id"]), "post"
+            if link_kind == "post" and url in ctx.seen_urls:
                 continue
-            if url:
+            if link_kind == "post" and url:
                 ctx.seen_urls.add(url)
             plat = r.get("platform") or "max"
             who = r.get("author_name") or ("участник чата" if plat == "max" else r["chat_title"])
@@ -522,7 +525,7 @@ def _save_results(session: AsyncSession, ctx: PipelineContext, q: dict[str, str]
             )
             meta = {"kind": "max_chat", "text": r["text"], "has_media": r["has_media"], "media_url": r["media_url"],
                     "is_forwarded": r["is_forwarded"], "author_external_id": r["author_external_id"],
-                    "chat_external_id": r["chat_external_id"],
+                    "chat_external_id": r["chat_external_id"], "link_kind": link_kind,
                     "author_name": r.get("author_name"), "chat_title": r["chat_title"], "sent_at": r["sent_at"],
                     "platform": plat, "outlet": f"{PLATFORM_KIND_LABELS.get(plat, plat)} «{r['chat_title']}»"}
         else:
@@ -611,6 +614,7 @@ async def _ensure_chat_pool(session: AsyncSession, ctx: PipelineContext) -> None
         "chat_message_id": m.id, "external_id": m.external_id, "chat_external_id": c.external_id,
         "chat_title": c.title, "author_external_id": m.author_external_id, "author_name": m.author_name,
         "platform": c.platform or "max", "message_url": m.message_url,
+        "link": _links.resolve(m, c),
         "text": m.text, "sent_at": m.sent_at, "has_media": bool(m.has_media), "media_url": m.media_url,
         "is_forwarded": bool(m.is_forwarded), "_stems": stems(m.text),
     } for m, c in rows]
@@ -709,7 +713,7 @@ async def stage_intelligence(session: AsyncSession, ctx: PipelineContext) -> Non
             "name": (prof.name if prof and prof.name else meta.get("author_name")),
             "has_phone": bool(prof and prof.phone), "username": prof.username if prof else None,
             "quote": s.snippet, "chat_title": meta.get("chat_title"), "sent_at": _iso(s.published_at),
-            "time_msk": hhmm_msk(s.published_at), "message_url": s.url,
+            "time_msk": hhmm_msk(s.published_at), "message_url": s.url, "link_kind": meta.get("link_kind") or "none",
             "uniqueness_score": ctx.uniq[sid].uniqueness_score, "platform": meta.get("platform") or "max",
         })
     if selected:
@@ -734,7 +738,7 @@ async def stage_intelligence(session: AsyncSession, ctx: PipelineContext) -> Non
     for c in it["contradictions"][:2]:
         await _log(session, ctx, "intelligence", f"Противоречие: {c['text']}", level="warn")
     ctx.notes["intelligence"] = (f"первоисточников: {sum(1 for r in ctx.uniq.values() if r.is_primary)}, "
-                                 f"контактов: {len(ctx.contacts)}, противоречий: {len(it['contradictions'])}")
+                                 f"контактов с телефоном: {sum(1 for c in ctx.contacts if c['has_phone'])}, противоречий: {len(it['contradictions'])}")
     await _pause(0.6)
 
 
@@ -1007,6 +1011,7 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
             "text": f"{label}: {s.title}" + (f" (+{dup} дубл.)" if dup else ""),
             "source_ids": [sid], "state": "confirmed" if s.kind == SourceKind.official else None,
             "time": hhmm_msk(s.published_at), "kind": s.kind.value, "url": s.url,
+            "link_kind": meta.get("link_kind") or ("post" if s.url else "none"),
             "published_at": _iso(s.published_at), "uniqueness": u.uniqueness_score if u else None,
             "duplicates": dup, "is_primary": True, "note": first_sentence(s.snippet or "", 160),
         })
@@ -1043,7 +1048,7 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
     contacts = _report_contacts(ctx)
     for c in contacts[:4]:
         plat = {"telegram": "Telegram"}.get(c.get("platform") or "max", "MAX")
-        phone_note = f"телефон в профиле {plat}" if c["has_phone"] else f"телефон скрыт — написать в {plat}"
+        phone_note = f"телефон в профиле {plat}"
         verify_rows.append({"text": f"Позвонить очевидцу: {c['name'] or 'автор сообщения'} ({c['chat_title']}, {phone_note}) — "
                                     f"«{first_sentence(c['quote'] or '', 90)}»",
                             "source_ids": [c["source_id"]], "state": None})
@@ -1065,10 +1070,12 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
 
 
 def _report_contacts(ctx: PipelineContext) -> list[dict[str, Any]]:
-    """Один контакт на автора (первое уникальное сообщение), сначала — с телефоном. Без самого номера:
-    телефон отдаёт только /api/.../contacts (редактор)."""
+    """Один контакт на автора (первое уникальное сообщение) — ТОЛЬКО авторы с телефоном (v4).
+    Без самого номера: телефон отдаёт только /api/.../contacts (редактор)."""
     by_author: dict[str, dict[str, Any]] = {}
     for c in ctx.contacts:
+        if not c.get("has_phone"):
+            continue
         key = c["author_external_id"] or f"src{c['source_id']}"
         if key in by_author:
             by_author[key]["messages"] += 1

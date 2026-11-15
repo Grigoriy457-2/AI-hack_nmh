@@ -1,0 +1,39 @@
+# Продакшен: готовый образ из GHCR (собирает .github/workflows/cd.yml) + MySQL 8.
+# На сервере рядом должен лежать .env с ключами (XAI_API_KEY, TG_*, MAX_BOT_TOKEN, SECRET_KEY, ...).
+services:
+  db:
+    image: mysql:8
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    environment:
+      MYSQL_DATABASE: newsflow
+      MYSQL_USER: newsflow
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-newsflow}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  app:
+    image: ${NEWSFLOW_IMAGE:?укажите NEWSFLOW_IMAGE, например ghcr.io/owner/ai-hack_nmh:latest}
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: mysql+aiomysql://newsflow:${MYSQL_PASSWORD:-newsflow}@db:3306/newsflow?charset=utf8mb4
+    volumes:
+      - telegram_session:/srv/data/telegram
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  telegram_session:

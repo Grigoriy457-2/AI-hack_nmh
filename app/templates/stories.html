@@ -6,18 +6,27 @@
   <div class="page-title">
     <h1>Сюжеты</h1>
     <form method="get" action="/stories" role="search" style="display:flex;gap:6px">
+      {% if is_archive %}<input type="hidden" name="archived" value="1">{% endif %}
       {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
       <label class="sr-only" for="sq">Поиск по сюжетам</label>
       <input class="input" id="sq" name="q" value="{{ q }}" placeholder="Поиск по названию и зацепке" style="width:240px;max-width:100%">
       <button class="btn" type="submit">Найти</button>
     </form>
   </div>
+  <nav class="tabs tabs--page" aria-label="Сюжеты в работе и архив">
+    <a class="tab" href="/stories{{ '?q=' ~ q|urlencode if q }}" aria-current="{{ 'false' if is_archive else 'page' }}" aria-selected="{{ 'false' if is_archive else 'true' }}">В работе <span class="count">{{ total }}</span></a>
+    <a class="tab" href="/stories?archived=1{{ '&q=' ~ q|urlencode if q }}" aria-current="{{ 'page' if is_archive else 'false' }}" aria-selected="{{ 'true' if is_archive else 'false' }}">Архив <span class="count">{{ archive_total }}</span></a>
+  </nav>
+  {% if not is_archive %}
   <div class="filters" style="margin:0 4px 14px" aria-label="Фильтр по статусу">
     <a class="chip" href="/stories{{ '?q=' ~ q|urlencode if q }}" aria-pressed="{{ 'true' if not status else 'false' }}" style="display:inline-flex;align-items:center;text-decoration:none">Все <span class="count" style="margin-left:6px">{{ total }}</span></a>
-    {% for s in STATUS_ORDER %}
+    {% for s in STATUS_ORDER if (s|ev) != 'rejected' %}
     <a class="chip" href="/stories?status={{ s|ev }}{{ '&q=' ~ q|urlencode if q }}" aria-pressed="{{ 'true' if status == s|ev else 'false' }}" style="display:inline-flex;align-items:center;text-decoration:none">{{ s|status_label }} <span class="count" style="margin-left:6px">{{ counts.get(s|ev, 0) }}</span></a>
     {% endfor %}
   </div>
+  {% else %}
+  <p class="muted" style="margin:0 4px 14px;font-size:14px">Сюжеты, отмеченные «Не подтвердилось». Любой можно открыть и вернуть в работу.</p>
+  {% endif %}
   <div class="pane">
     {% if stories %}
     <table class="table">
@@ -36,7 +45,7 @@
       </tbody>
     </table>
     {% else %}
-    <div class="empty"><b>{% if q or status %}Ничего не нашлось{% else %}Сюжетов пока нет{% endif %}</b>{% if q or status %}Сбросьте фильтр или измените запрос.{% else %}Возьмите возможный сюжет на <a href="/">радаре</a> или заведите свою зацепку.{% endif %}</div>
+    <div class="empty"><b>{% if q or status %}Ничего не нашлось{% elif is_archive %}Архив пуст{% else %}Сюжетов в работе нет{% endif %}</b>{% if q or status %}Сбросьте фильтр или измените запрос.{% elif is_archive %}Сюда попадают сюжеты, отмеченные «Не подтвердилось».{% else %}Возьмите возможный сюжет на <a href="/">радаре</a> или заведите свою зацепку.{% endif %}</div>
     {% endif %}
   </div>
 </div>

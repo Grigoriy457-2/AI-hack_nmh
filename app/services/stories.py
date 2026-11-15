@@ -44,7 +44,7 @@ from app.schemas import (
     SourceOut,
     UnconfirmedItem,
 )
-from app.services import workflow
+from app.services import links, workflow
 from app.services.metrics import draft_similarity, tokenize
 
 log = logging.getLogger("newsflow.stories")
@@ -296,18 +296,22 @@ async def list_sources(session: AsyncSession, inv_id: int, *, kind: SourceKind |
     cluster_sizes = Counter(s.cluster_id for s in all_sources if s.cluster_id is not None)
     items = [s for s in all_sources if (kind is None or s.kind == kind) and (not primary_only or s.is_primary)]
     items.sort(key=lambda s: (not s.is_primary, -(s.uniqueness_score if s.uniqueness_score is not None else -1), s.id))
+    chats = await links.chats_by_id(session, {s.chat_message.chat_id for s in items if s.chat_message is not None})
     out = []
     for s in items:
         o = SourceOut.model_validate(s)
         o.duplicates_count = max(cluster_sizes.get(s.cluster_id, 1) - 1, 0) if s.cluster_id is not None else 0
+        chat = chats.get(s.chat_message.chat_id) if s.chat_message is not None else None
         if s.chat_message is not None:
             o.platform = s.chat_message.platform or "max"
+        o.url, o.link_kind = links.for_source(s, chat)  # и для старых записей — из chat_messages.message_url
         out.append(o)
     return out
 
 
 async def list_contacts(session: AsyncSession, inv_id: int) -> list[ContactOut]:
-    """«Кому позвонить»: первоисточники из чатов (uniqueness ≥ 0.5, важные) + профили авторов."""
+    """«Кому позвонить»: первоисточники из чатов (uniqueness ≥ 0.5, важные) + профили авторов.
+    v4: только авторы с телефоном (без телефона — не включаются)."""
     from app.integrations.max.poller import ensure_author_profile
 
     sources = (await session.scalars(
@@ -328,8 +332,7 @@ async def list_contacts(session: AsyncSession, inv_id: int) -> list[ContactOut]:
         cur = best.get(msg.author_external_id)
         if cur is None or (s.uniqueness_score or 0) > (cur[0].uniqueness_score or 0):
             best[msg.author_external_id] = (s, msg)
-    chat_rows = {cid: (title, platform) for cid, title, platform in
-                 (await session.execute(select(MaxChat.id, MaxChat.title, MaxChat.platform))).all()}
+    chats = await links.chats_by_id(session, {msg.chat_id for _, msg in best.values()})
     out: list[ContactOut] = []
     touched = False
     for author_id, (s, msg) in best.items():
@@ -337,17 +340,21 @@ async def list_contacts(session: AsyncSession, inv_id: int) -> list[ContactOut]:
         if prof is None:
             prof = await ensure_author_profile(session, author_id)
             touched = touched or prof is not None
-        title, platform = chat_rows.get(msg.chat_id, (None, "max"))
+        if not (prof and prof.phone):
+            continue
+        chat = chats.get(msg.chat_id)
+        title, platform = (chat.title, chat.platform) if chat else (None, "max")
+        url, kind = links.for_source(s, chat)
         out.append(ContactOut(
             source_id=s.id, author_external_id=author_id,
             name=(prof.name if prof else None) or msg.author_name,
             phone=prof.phone if prof else None, username=prof.username if prof else None,
             quote=msg.text or s.snippet or "", chat_title=title, platform=platform or "max",
-            sent_at=msg.sent_at, message_url=s.url, uniqueness_score=s.uniqueness_score,
+            sent_at=msg.sent_at, message_url=url, link_kind=kind, uniqueness_score=s.uniqueness_score,
         ))
     if touched:
         await session.commit()
-    out.sort(key=lambda c: (c.phone is None, c.sent_at or utcnow()))
+    out.sort(key=lambda c: c.sent_at or utcnow())
     return out
 
 

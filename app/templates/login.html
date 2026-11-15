@@ -4,10 +4,7 @@
 <section class="login">
   <div class="login__box">
     <h1>Смена начинается</h1>
-    <p>NEWSFLOW слушает домовые чаты MAX и публичные Telegram-каналы, собирает похожие сообщения в возможные сюжеты и помогает проверить их. Решение передать новость дальше принимаете вы.</p>
-    <div class="login__plates" aria-hidden="true">
-      <span class="plate">Чертаново Центральное</span><span class="plate">Северное Бутово</span><span class="plate">Зюзино</span><span class="plate">ЖК «Битцевский»</span>
-    </div>
+    <p style="margin-bottom:24px">NEWSFLOW слушает чаты и каналы MAX и Telegram, собирает похожие сообщения в возможные сюжеты и помогает проверить их.</p>
     {% if error %}<div class="flash flash--err">{{ error }}</div>{% endif %}
     <form method="post" action="/login">
       {% if editor %}<input type="hidden" name="user_id" value="{{ editor.id }}">{% endif %}

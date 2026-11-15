@@ -1,0 +1,107 @@
+name: CD
+
+# Публикует Docker-образ в GitHub Container Registry после успешного CI на master
+# и при тегах v*. Деплой на сервер по SSH — только если заданы секреты DEPLOY_*.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  image:
+    name: Образ в GHCR
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Имя образа (GHCR требует нижний регистр)
+        id: name
+        run: echo "image=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name != 'push' }}
+            type=sha,prefix=,format=short
+            type=ref,event=tag
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Деплой по SSH
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+    steps:
+      - name: Пропуск — секреты деплоя не заданы
+        if: env.DEPLOY_HOST == ''
+        run: echo "DEPLOY_HOST не задан — образ опубликован, деплой пропущен."
+
+      - uses: actions/checkout@v4
+        if: env.DEPLOY_HOST != ''
+
+      - name: SSH-ключ
+        if: env.DEPLOY_HOST != ''
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Обновить сервис
+        if: env.DEPLOY_HOST != ''
+        env:
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '~/newsflow' }}
+          IMAGE: ${{ needs.image.outputs.image }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SSH="ssh -i ~/.ssh/id_deploy ${DEPLOY_USER}@${DEPLOY_HOST}"
+          $SSH "mkdir -p ${DEPLOY_PATH}"
+          scp -i ~/.ssh/id_deploy docker-compose.prod.yml "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.yml"
+          # Токен передаём через stdin, чтобы он не попал в командную строку на сервере.
+          printf '%s' "$GHCR_TOKEN" | $SSH "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+          $SSH "cd ${DEPLOY_PATH} && NEWSFLOW_IMAGE='${IMAGE}:latest' docker compose pull app \
+                && NEWSFLOW_IMAGE='${IMAGE}:latest' docker compose up -d \
+                && docker image prune -f"

@@ -412,6 +412,8 @@ a.ext:hover { color: var(--ink); text-decoration-color: currentColor; }
 }
 .tab:hover { color: var(--ink); }
 .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.tabs--page { padding: 0 4px; margin: 0 0 14px; }
+a.tab { text-decoration: none; display: inline-flex; align-items: baseline; gap: 4px; }
 .tab .count { font-size: 14px; margin-left: 3px; }
 .tabpanel { padding: 16px 20px 22px; }
 
@@ -618,6 +620,7 @@ dialog.modal { max-height: calc(100vh - 32px); overflow-y: auto; }
 .radios label:has(input:checked) { border-color: var(--ink); color: var(--ink); }
 
 .handoff-note { padding: 12px 14px; border-radius: var(--r-btn); background: var(--ok-soft); border-left: 3px solid var(--ok); font-size: 14.5px; }
+.archive-note { display: flex; gap: 10px 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .handoff-note.is-rejected { background: var(--siren-soft); border-left-color: var(--siren); }
 
 /* ================================================================ responsive */
