@@ -108,7 +108,7 @@
 
   {# ================================================================ справка / черновик #}
   <section class="pane pane--main is-shown" id="col-main">
-    <div class="tabs" role="tablist" aria-label="Справка и черновик">
+    <div class="tabs" role="tablist" aria-label="Справка и черновик" style="overflow: hidden;">
       <button class="tab" role="tab" id="tab-report" aria-controls="panel-report" aria-selected="true" data-tab="report">Справка</button>
       <button class="tab" role="tab" id="tab-draft" aria-controls="panel-draft" aria-selected="false" data-tab="draft">Черновик{% if current_draft %} <span class="count t">v{{ current_draft.version }}</span>{% endif %}</button>
       <button class="tab" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" data-tab="history">История <span class="count">{{ history|length }}</span></button>
