@@ -12,5 +12,6 @@ pydantic-settings>=2.3
 itsdangerous>=2.1
 anthropic>=0.40
 telethon>=1.36          # Telegram (MTProto); опционально, проверено с 1.45.0
+qrcode>=7.4             # QR-вход в Telegram (python -m app.integrations.telegram.login --qr)
 pytest>=8.0
 pytest-asyncio>=0.23
