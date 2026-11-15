@@ -84,9 +84,12 @@ def _to_dt(value: Any) -> datetime | None:
 def fmt_dt(value: Any, mode: str = "short") -> str:
     """UTC -> МСК. short: «14:31, 14 ноя»; time: «14:31»; date: «14 ноя»."""
     d = _to_dt(value)
-    if d is None:
+    if d is None or d.year in (1, 9999):
         return "—"
-    m = d + MSK
+    try:
+        m = d + MSK
+    except OverflowError:
+        return "—"
     if mode == "time":
         return m.strftime("%H:%M")
     if mode == "date":

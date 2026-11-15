@@ -40,11 +40,18 @@ def stems(text: str) -> set[str]:
 
 
 def to_msk(dt: datetime | None) -> datetime | None:
-    return dt + MSK_OFFSET if dt else None
+    # datetime.max/min — заглушки сортировки «без даты»: сдвиг по МСК вышел бы за пределы.
+    if not dt or dt.year in (1, 9999):
+        return None
+    try:
+        return dt + MSK_OFFSET
+    except OverflowError:
+        return None
 
 
 def hhmm_msk(dt: datetime | None) -> str | None:
-    return (dt + MSK_OFFSET).strftime("%H:%M") if dt else None
+    m = to_msk(dt)
+    return m.strftime("%H:%M") if m else None
 
 
 _ABBR = frozenset({"ул", "д", "г", "кв", "м", "им", "пр", "ш", "корп", "стр", "просп", "пер", "т", "н", "э", "т.е", "т.д", "р", "руб", "мин", "ч"})

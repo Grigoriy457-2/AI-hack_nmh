@@ -59,7 +59,13 @@ MSK = timedelta(hours=3)
 
 
 def _when(dt: datetime | None) -> str | None:
-    return (dt + MSK).strftime("%d.%m %H:%M") if dt else None
+    # datetime.max/min — заглушки сортировки для источников без даты: времени нет.
+    if not dt or dt.year in (1, 9999):
+        return None
+    try:
+        return (dt + MSK).strftime("%d.%m %H:%M")
+    except OverflowError:
+        return None
 
 
 def _quote(text: str, limit: int = 170) -> str:
