@@ -56,13 +56,17 @@ from app.schemas import (
     InvestigationOut,
     LoginIn,
     MediaItemOut,
+    ModeOut,
     ProgressOut,
     ReportOut,
     SearchIterationOut,
     SourceAddIn,
     SourceChatOut,
     SourceChatUpdate,
+    SourceDeleteOut,
     SourceOut,
+    SourcePreviewOut,
+    SourceResolveIn,
     StatsOut,
     StatusHistoryOut,
     SyncResult,
@@ -489,7 +493,7 @@ async def rebuild_channel_dna(channel_id: int, user: User = Depends(current_user
     return ch
 
 
-# ================================================================ источники (MAX + Telegram)
+# ================================================================ источники (MAX + Telegram + RSS)
 @router.get("/sources/chats", response_model=list[SourceChatOut])
 @router.get("/max/chats", response_model=list[SourceChatOut], include_in_schema=False)
 async def list_source_chats(platform: str | None = None, user: User = Depends(current_user),
@@ -497,16 +501,27 @@ async def list_source_chats(platform: str | None = None, user: User = Depends(cu
     return await sources.list_source_chats(session, platform)
 
 
+@router.post("/sources/resolve", response_model=SourcePreviewOut)
+async def resolve_source(data: SourceResolveIn, user: User = Depends(current_user),
+                         session: AsyncSession = Depends(get_session)):
+    """Превью до добавления: платформа по ссылке/@username + реальные название, тип, аватар, подписчики.
+    Ничего не сохраняет; кэш 10 мин. Ошибки получения данных — в поле ``error`` (200)."""
+    with _err():
+        return SourcePreviewOut(**await sources.resolve(session, data.ref, data.platform))
+
+
 @router.post("/sources", response_model=SourceChatOut, status_code=201)
 async def add_source(data: SourceAddIn, response: Response, user: User = Depends(current_user),
                      session: AsyncSession = Depends(get_session)):
-    """Подключить источник по ссылке / @username (Telegram) или id чата (MAX)."""
+    """Подключить источник: @username / t.me (Telegram), id чата / max.ru (MAX), сайт или RSS (rss);
+    ``platform="auto"`` — определить по ссылке. Название — реальное (resolve)."""
     with _err():
         chat, created = await sources.add_source(session, user, data.platform, data.ref,
                                                  title=data.title, district=data.district)
     if not created:
         response.status_code = 200
-    return next(c for c in await sources.list_source_chats(session) if c.id == chat.id)
+    with _err():
+        return await sources.get_source_out(session, chat.id)
 
 
 @router.patch("/sources/chats/{chat_id}", response_model=SourceChatOut)
@@ -518,21 +533,96 @@ async def update_source_chat(chat_id: int, data: SourceChatUpdate, user: User = 
                                            title=data.title)
 
 
-@router.delete("/sources/chats/{chat_id}", status_code=204)
+@router.delete("/sources/chats/{chat_id}", response_model=SourceDeleteOut)
+@router.delete("/sources/{chat_id}", response_model=SourceDeleteOut, include_in_schema=False)
+@router.delete("/max/chats/{chat_id}", response_model=SourceDeleteOut, include_in_schema=False)
 async def delete_source_chat(chat_id: int, user: User = Depends(current_user),
                              session: AsyncSession = Depends(get_session)):
+    """Удалить источник: скрыт из списка, его сообщения archived (уходят из ленты/emerging/поиска),
+    цитаты и ссылки в уже созданных сюжетах остаются."""
     with _err():
-        await sources.delete_source(session, chat_id)
-    return Response(status_code=204)
+        return SourceDeleteOut(**await sources.delete_source(session, chat_id))
 
 
 @router.post("/sources/sync", response_model=SyncResult)
 @router.post("/max/sync", response_model=SyncResult, include_in_schema=False)
 async def sync_sources(user: User = Depends(current_user), session: AsyncSession = Depends(get_session)):
-    """«Синхронизировать сейчас» (MAX + Telegram)."""
+    """«Синхронизировать сейчас» (MAX + Telegram + RSS)."""
     from app.integrations.max.poller import sync_once
 
-    return await sync_once(session)
+    res = await sync_once(session)
+    try:
+        rss = await sources.sync_rss(session)
+    except Exception as e:  # noqa: BLE001
+        log.warning("RSS sync failed: %r", e)
+        res.errors.append(f"rss: {e}")
+        return res
+    res.chats += rss.chats
+    res.new_messages += rss.new_messages
+    res.errors += rss.errors
+    for k, v in rss.by_platform.items():
+        res.by_platform[k] = res.by_platform.get(k, 0) + v
+    return res
+
+
+# ---------------------------------------------------------------- режим данных (TZ_v3 п.1)
+def _provider_name(obj: Any) -> str | None:
+    if obj is None:
+        return None
+    return str(getattr(obj, "name", None) or type(obj).__name__)
+
+
+@router.get("/mode", response_model=ModeOut)
+async def get_mode() -> ModeOut:
+    """Какие данные сейчас в работе: live/demo, LLM, провайдеры Telegram/MAX/поиска. Без входа."""
+    llm = None
+    try:
+        from app.ai.llm import get_llm
+
+        llm = _provider_name(get_llm())
+    except Exception as e:  # noqa: BLE001
+        log.debug("mode: llm %r", e)
+    if llm and llm not in ("anthropic", "extractive", "mock"):
+        llm = "anthropic" if "anthropic" in llm.lower() or "claude" in llm.lower() else (
+            "extractive" if "extract" in llm.lower() else llm)
+    tg_provider = None
+    try:
+        from app.integrations.max.poller import telegram_module
+
+        tg = telegram_module()
+        if tg is not None:
+            tg_provider = _provider_name(tg.get_telegram_client())
+    except Exception as e:  # noqa: BLE001
+        log.debug("mode: telegram %r", e)
+    max_provider = None
+    try:
+        from app.integrations.max.client import get_max_client
+
+        max_provider = _provider_name(get_max_client())
+    except Exception as e:  # noqa: BLE001
+        log.debug("mode: max %r", e)
+    search: list[str] = []
+    try:
+        from app.integrations.search import get_search_provider
+
+        p = get_search_provider()
+        inner = getattr(p, "providers", None)
+        search = [n for n in (_provider_name(x) for x in inner) if n] if inner else [_provider_name(p) or "?"]
+    except Exception as e:  # noqa: BLE001
+        log.debug("mode: search %r", e)
+    extra: dict[str, Any] = {}
+    try:  # DEV-REALDATA: app.config.data_mode_status() — подпись режима, заметки, rss_ingest
+        from app.config import data_mode_status
+
+        st = data_mode_status()
+        extra = {"label": st.get("label"), "rss_ingest": st.get("rss_ingest"), "notes": st.get("notes") or []}
+        if isinstance(st.get("search"), str) and not st["search"].startswith("error"):
+            parts = [p for p in st["search"].split("+") if p]
+            search = parts if len(parts) > 1 or search in ([], ["?"]) else search
+    except Exception as e:  # noqa: BLE001
+        log.debug("mode: data_mode_status %r", e)
+    return ModeOut(data_mode=sources.data_mode(), llm=llm or "mock", telegram_provider=tg_provider,
+                   max_provider=max_provider, search_providers=search, **extra)
 
 
 # ---------------------------------------------------------------- Telegram (docs/TELEGRAM.md §4.6)
@@ -565,21 +655,22 @@ async def telegram_add_source(data: dict, response: Response, user: User = Depen
                                                  district=data.get("district"))
     if not created:
         response.status_code = 200
-    return next(c for c in await sources.list_source_chats(session) if c.id == chat.id)
+    with _err():
+        return await sources.get_source_out(session, chat.id)
 
 
-@router.delete("/telegram/sources/{external_id}", status_code=204)
+@router.delete("/telegram/sources/{external_id}", response_model=SourceDeleteOut)
 async def telegram_remove_source(external_id: str, user: User = Depends(current_user),
                                  session: AsyncSession = Depends(get_session)):
     from app.models import MaxChat
 
     ext = external_id if external_id.startswith("tg:") else f"tg:{external_id.lstrip('@').lower()}"
-    chat = await session.scalar(select(MaxChat).where(MaxChat.platform == "telegram", MaxChat.external_id == ext))
+    chat = await session.scalar(select(MaxChat).where(MaxChat.platform == "telegram", MaxChat.external_id == ext,
+                                                      MaxChat.deleted_at.is_(None)))
     if chat is None:
         raise HTTPException(404, "Источник не найден")
     with _err():
-        await sources.delete_source(session, chat.id)
-    return Response(status_code=204)
+        return SourceDeleteOut(**await sources.delete_source(session, chat.id))
 
 
 # ================================================================ демо-поток

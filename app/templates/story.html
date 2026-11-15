@@ -142,7 +142,7 @@
           </li>
           {% else %}
           <li class="fact" data-state="{{ 'confirmed' if sec.key == 'sources' else (st or 'confirmed') }}" style="border-left-color: var(--line)">
-            <div class="fact__text">{% if it.time %}<span class="fact__time">{{ it.time }}</span>{% endif %}{{ it.text }}{% if it.possibly_old %} <span class="badge badge--old">возможно старое фото</span>{% endif %}{{ src_refs(it.source_ids) }}</div>
+            <div class="fact__text">{% if it.time %}<span class="fact__time">{{ it.time }}</span>{% endif %}{{ it.text }}{% if it.possibly_old %} <span class="badge badge--old">возможно старое фото</span>{% endif %}{{ src_refs(it.source_ids) }}{% if it.url|safe_url %} <a class="ext" href="{{ it.url }}" target="_blank" rel="noopener noreferrer">{{ it.url|host }}</a>{% endif %}</div>
           </li>
           {% endif %}
           {% endfor %}
@@ -240,7 +240,7 @@
             {% if c.chat_title %}{{ plate(c.chat_title) }}{% endif %}
             <span class="t muted">{{ c.sent_at|dt('time') }}</span>
           </div>
-          <p class="callee__quote">{{ c.quote }}</p>
+          <p class="callee__quote">{{ c.quote }}{% if c.message_url|safe_url %} <a class="ext" href="{{ c.message_url }}" target="_blank" rel="noopener noreferrer">сообщение на {{ c.message_url|host }}</a>{% endif %}</p>
           {% if c.phone %}
           <a class="tel" href="{{ c.phone|tel }}">{{ icon('phone') }}{{ c.phone }}</a>
           {% else %}
@@ -270,7 +270,7 @@
           <div class="src__title">{% if s.url|safe_url %}<a href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.title or s.url|host }}</a>{% else %}{{ s.title or (msg.author_name if msg else 'Источник') }}{% endif %}</div>
           {% if s.snippet or msg %}<div class="src__snip">{{ (s.snippet or msg.text)|truncate(220) }}</div>{% endif %}
           <div class="src__meta">
-            {% if msg and chats_by_id.get(msg.chat_id) %}<span>{{ chats_by_id[msg.chat_id].title }}</span>{% elif s.url|safe_url %}<span>{{ s.url|host }}</span>{% endif %}
+            {% if msg and chats_by_id.get(msg.chat_id) %}<span>{{ chats_by_id[msg.chat_id].title }}</span>{% endif %}{% if s.url|safe_url %}<a class="ext" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.url|host }}</a>{% endif %}
             <span class="t">{{ (s.published_at or (msg.sent_at if msg else None))|dt }}</span>
             {% if s.uniqueness_score is not none %}<span>уникальность {{ s.uniqueness_score|pct }}</span>{% endif %}
           </div>
@@ -280,7 +280,7 @@
             {% for d in g.duplicates %}
             {% set dm = d.chat_message %}
             <div class="src" id="src-{{ d.id }}">
-              <div class="src__head"><span class="src__n t">{{ source_num[d.id] }}</span>{% if platform_of[d.id] %}{{ platform(platform_of[d.id], True) }}{% endif %}<span class="src__title">{{ d.title or (dm.author_name if dm else '') }}</span></div>
+              <div class="src__head"><span class="src__n t">{{ source_num[d.id] }}</span>{% if platform_of[d.id] %}{{ platform(platform_of[d.id], True) }}{% endif %}<span class="src__title">{% if d.url|safe_url %}<a href="{{ d.url }}" target="_blank" rel="noopener noreferrer">{{ d.title or d.url|host }}</a>{% else %}{{ d.title or (dm.author_name if dm else '') }}{% endif %}</span></div>
               <div class="src__meta">{% if dm and chats_by_id.get(dm.chat_id) %}<span>{{ chats_by_id[dm.chat_id].title }}</span>{% endif %}<span class="t">{{ (d.published_at or (dm.sent_at if dm else None))|dt }}</span></div>
             </div>
             {% endfor %}
@@ -303,7 +303,7 @@
           <figure class="media {{ 'is-old' if m.possibly_old }}" style="margin:0">
             {% if img_ok(u) %}<img src="{{ u }}" alt="{{ m.relation or 'Фото из источника' }}" loading="lazy">{% else %}<div class="media__ph">{{ icon('video' if (m.kind|ev) == 'video' else 'image') }}</div>{% endif %}
             {% if m.possibly_old %}<span class="badge badge--old">возможно старое фото</span>{% endif %}
-            <figcaption class="media__cap">{{ m.origin or '' }}{% if m.captured_at %} <span class="t">{{ m.captured_at|dt }}</span>{% endif %}{% if m.relation %}<br><span class="muted">{{ m.relation|truncate(90) }}</span>{% endif %}<br><span class="muted">права не проверены</span></figcaption>
+            <figcaption class="media__cap">{{ m.origin or '' }}{% if m.captured_at %} <span class="t">{{ m.captured_at|dt }}</span>{% endif %}{% if m.relation %}<br><span class="muted">{{ m.relation|truncate(90) }}</span>{% endif %}<br><span class="muted">права не проверены</span>{% if m.url|safe_url %}<br><a class="ext" href="{{ m.url }}" target="_blank" rel="noopener noreferrer">{{ m.url|host }}</a>{% endif %}</figcaption>
           </figure>
           {% endfor %}
         </div>

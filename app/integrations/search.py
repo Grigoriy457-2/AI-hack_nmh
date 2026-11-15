@@ -1,9 +1,16 @@
-"""Web search (контракт). Зона DEV-AI.
+"""Web search (контракт). Зона DEV-AI / DEV-REALDATA.
 
 ``SearchProvider.search(query) -> list[SearchResult]``. Реализации: ``MockSearchProvider``
-(новостные порталы, ТГ-каналы, mos.ru/МЧС — офлайн), ``TavilySearchProvider`` (TAVILY_API_KEY),
-``SerperSearchProvider`` (SERPER_API_KEY).
+(новостные порталы, ТГ-каналы, mos.ru/МЧС — офлайн, только DATA_MODE=demo), ``RssSearchProvider``
+(live, без ключей: Google News RSS + проверенные RSS-ленты СМИ/ведомств, см. ``app.integrations.rss``),
+``TavilySearchProvider`` (TAVILY_API_KEY), ``SerperSearchProvider`` (SERPER_API_KEY),
+``CompositeSearchProvider`` (параллельно, asyncio.gather, дедуп по url).
 Получать провайдера только через ``get_search_provider()``.
+
+Реальные результаты: ``url`` — из ответа источника (статья; для Google News — прямая ссылка, если
+удалось раскрыть, иначе рабочая ссылка news.google.com), ``published_at`` — дата публикации,
+``extra["outlet"]`` — издание, ``extra["outlet_url"]`` — сайт издания, ``extra["via"]`` —
+google_news|rss|tavily|serper, ``extra["google_news_url"]``, ``extra["resolved"]``.
 
 Медиа в результатах: ``media_urls`` — ссылки на фото/видео; ``extra["media"]`` (mock) —
 [{kind, url, thumbnail_url, captured_at (naive UTC|None), note}] для MEDIA FINDER.
@@ -23,7 +30,10 @@ log = logging.getLogger("newsflow.search")
 
 SourceType = Literal["news", "telegram", "official", "media", "web"]
 
-OFFICIAL_DOMAINS: tuple[str, ...] = ("mchs.gov.ru", "mvd.ru", "mos.ru")
+OFFICIAL_DOMAINS: tuple[str, ...] = (
+    "mchs.gov.ru", "mvd.ru", "xn--b1aew.xn--p1ai",  # мвд.рф
+    "mos.ru", "sobyanin.ru", "sledcom.ru", "genproc.gov.ru", "mosgorsud.ru", "kremlin.ru",
+)
 
 
 @dataclass(slots=True)
@@ -68,7 +78,16 @@ def domain_matches(url: str, domains: list[str] | tuple[str, ...] | None) -> boo
     if not domains:
         return True
     host = _host(url)
+    if host.startswith("www."):
+        host = host[4:]
     return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def result_matches(r: SearchResult, domains: list[str] | tuple[str, ...] | None) -> bool:
+    """Фильтр по доменам: url статьи или сайт издания (для нераскрытых ссылок Google News)."""
+    if not domains:
+        return True
+    return domain_matches(r.url, domains) or domain_matches(str(r.extra.get("outlet_url") or ""), domains)
 
 
 def is_official_url(url: str) -> bool:
@@ -93,7 +112,9 @@ class MockSearchProvider(SearchProvider):
         q = stems(query)
         if not q:
             return []
-        if q & mock_data.SCENARIO_LOCATION_STEMS:
+        from app.config import settings
+
+        if q & mock_data.SCENARIO_LOCATION_STEMS and settings.is_demo:
             results = self._scenario(q, mock_data)
         else:
             results = self._generic(query, q, mock_data)
@@ -257,7 +278,8 @@ class TavilySearchProvider(SearchProvider):
                 published_at=_parse_dt(r.get("published_date")),
                 source_type="media" if media else _guess_type(url, "news"),
                 media_urls=media,
-                extra={"score": r.get("score"), "media": [{"kind": "photo", "url": m, "thumbnail_url": m,
+                extra={"score": r.get("score"), "via": "tavily", "outlet": _host(url) or None,
+                       "outlet_url": f"https://{_host(url)}" if _host(url) else None, "media": [{"kind": "photo", "url": m, "thumbnail_url": m,
                                                            "captured_at": None, "note": None} for m in media]},
             ))
         if domains:
@@ -310,7 +332,9 @@ class SerperSearchProvider(SearchProvider):
                 published_at=None,
                 source_type="media" if img else _guess_type(url, "news"),
                 media_urls=[img] if img else [],
-                extra={"date_text": r.get("date"), "source": r.get("source"),
+                extra={"date_text": r.get("date"), "source": r.get("source"), "via": "serper",
+                       "outlet": r.get("source") or _host(url) or None,
+                       "outlet_url": f"https://{_host(url)}" if _host(url) else None,
                        "media": [{"kind": "photo", "url": img, "thumbnail_url": r.get("thumbnailUrl") or img,
                                   "captured_at": None, "note": None}] if img else []},
             ))
@@ -324,21 +348,211 @@ class SerperSearchProvider(SearchProvider):
             self._client = None
 
 
+# ---------------------------------------------------------------- live: Google News RSS + ленты
+class RssSearchProvider(SearchProvider):
+    """Без ключей. Параллельно: Google News RSS (по запросу) + записи проверенных RSS-лент
+    (``rss.configured_feeds()``, кэш SEARCH_CACHE_TTL). Ссылки Google News раскрываются через
+    совпадение заголовка с записями лент; медиа — enclosure ленты или og:image статьи."""
+
+    name = "rss"
+
+    def __init__(self, *, google_news: bool | None = None, when: str | None = None) -> None:
+        from app.config import settings
+
+        self.google_news = settings.GOOGLE_NEWS_ENABLED if google_news is None else google_news
+        self.when = settings.GOOGLE_NEWS_WHEN if when is None else when
+
+    async def search(self, query, *, limit=10, domains=None, source_type=None) -> list[SearchResult]:
+        import asyncio
+
+        from app.integrations import rss
+
+        gn_query = query
+        if domains:
+            gn_query += " (" + " OR ".join(f"site:{d}" for d in domains if not d.startswith("xn--")) + ")"
+        feeds = rss.configured_feeds()
+        if domains:
+            feeds = [f for f in feeds if f.kind == "official" or domain_matches(f.url, domains)]
+        tasks = [rss.fetch_all(feeds)]
+        if self.google_news:
+            tasks.append(rss.google_news_search(gn_query, limit=max(limit * 2, 15), when=self.when or None))
+        res = await asyncio.gather(*tasks, return_exceptions=True)
+        feed_items = res[0] if isinstance(res[0], list) else []
+        gn_items = res[1] if len(res) > 1 and isinstance(res[1], list) else []
+        for e in res:
+            if isinstance(e, BaseException):
+                log.warning("RSS search part failed (%s): %r", query, e)
+        rss_out: list[SearchResult] = []
+        seen: set[str] = set()
+        for it in rss.match_items(feed_items, query, limit=limit * 2):
+            if it.url not in seen:
+                seen.add(it.url)
+                rss_out.append(self._from_item(it, "rss"))
+        all_items = feed_items
+        if gn_items and len(feed_items) < 50:  # для раскрытия ссылок нужен весь каталог лент
+            all_items = feed_items + await rss.fetch_all()
+        resolver = rss.GoogleNewsResolver(all_items) if gn_items else None
+        gn_out: list[SearchResult] = []
+        for it in gn_items:
+            direct = rss.decode_google_news_id(it.url)
+            match = resolver.resolve(it.title, it.outlet_url) if resolver and not direct else None
+            url = direct or (match.url if match else it.url)
+            if url in seen:
+                continue
+            seen.add(url)
+            r = self._from_item(it, "google_news")
+            r.url = url
+            r.extra["resolved"] = url != it.url
+            if match is not None:
+                r.snippet = match.summary or r.snippet
+                if match.image_url and not r.media_urls:
+                    r.media_urls = [match.image_url]
+                    r.extra["media"] = [_media(match.image_url, "enclosure RSS")]
+            gn_out.append(r)
+        out: list[SearchResult] = []
+        for i in range(max(len(rss_out), len(gn_out))):  # чередуем: ленты и Google News
+            out += [lst[i] for lst in (rss_out, gn_out) if i < len(lst)]
+        if domains:
+            out = [r for r in out if result_matches(r, domains)]
+        if source_type == "media":
+            out = [r for r in out if r.media_urls] + [r for r in out if not r.media_urls]
+            await _enrich_og_images(out[: limit + 3])
+            out = [r for r in out if r.media_urls]
+        return out[:limit]
+
+    @staticmethod
+    def _from_item(it: Any, via: str) -> SearchResult:
+        media = [it.image_url] if it.image_url else []
+        official = it.kind == "official" or is_official_url(it.url) or is_official_url(it.outlet_url or "")
+        return SearchResult(
+            title=it.title, url=it.url, snippet=it.summary or it.title, published_at=it.published_at,
+            source_type="official" if official else _guess_type(it.url, "news"),
+            media_urls=media,
+            extra={"outlet": it.outlet, "outlet_url": it.outlet_url, "via": via, "feed": it.feed_url,
+                   "google_news_url": it.extra.get("google_news_url"), "resolved": via == "rss",
+                   "media": [_media(m, "enclosure RSS") for m in media]},
+        )
+
+
+def _media(url: str, note: str | None) -> dict[str, Any]:
+    # captured_at неизвестна: дата публикации НЕ равна дате съёмки
+    kind = "video" if url.lower().split("?")[0].endswith((".mp4", ".mov", ".webm")) else "photo"
+    return {"kind": kind, "url": url, "thumbnail_url": url, "captured_at": None, "note": note}
+
+
+_og_cache: dict[str, str | None] = {}
+
+
+async def fetch_og_image(url: str, client: Any = None) -> str | None:
+    """og:image статьи (кэш на процесс). Только прямые ссылки (не news.google.com)."""
+    if not url or "news.google." in url:
+        return None
+    if url in _og_cache:
+        return _og_cache[url]
+    from app.integrations.webutil import http_client, parse_meta
+
+    own = client is None
+    client = client or http_client(timeout=8)
+    img = None
+    try:
+        r = await client.get(url)
+        if r.status_code < 400 and "html" in r.headers.get("content-type", ""):
+            meta = parse_meta(r.text)
+            img = meta.get("og:image") or meta.get("twitter:image")
+            if img and img.startswith("//"):
+                img = "https:" + img
+            if img and (not img.startswith("http") or "logo" in img.lower()):
+                img = None  # логотип издания — не фото события
+    except Exception as e:  # noqa: BLE001
+        log.debug("og:image %s failed: %r", url, e)
+    finally:
+        if own:
+            await client.aclose()
+    _og_cache[url] = img
+    return img
+
+
+async def _enrich_og_images(results: list[SearchResult]) -> None:
+    import asyncio
+
+    from app.integrations.webutil import http_client
+
+    todo = [r for r in results if not r.media_urls and "news.google." not in r.url]
+    if not todo:
+        return
+    async with http_client(timeout=8) as client:
+        imgs = await asyncio.gather(*(fetch_og_image(r.url, client) for r in todo), return_exceptions=True)
+    for r, img in zip(todo, imgs):
+        if isinstance(img, str) and img:
+            r.media_urls = [img]
+            r.extra["media"] = [_media(img, "og:image статьи")]
+
+
+class CompositeSearchProvider(SearchProvider):
+    """Несколько провайдеров параллельно (asyncio.gather), дедуп по url, кэш по запросу."""
+
+    def __init__(self, providers: list[SearchProvider]) -> None:
+        from app.config import settings
+        from app.integrations.webutil import TTLCache
+
+        self.providers = providers
+        self.name = "+".join(p.name for p in providers)
+        self._cache = TTLCache(ttl=max(30, int(settings.SEARCH_CACHE_TTL)), maxsize=256)
+
+    async def search(self, query, *, limit=10, domains=None, source_type=None) -> list[SearchResult]:
+        import asyncio
+
+        key = (query, limit, tuple(domains or ()), source_type)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return list(cached)
+        res = await asyncio.gather(*(p.search(query, limit=limit, domains=domains, source_type=source_type)
+                                     for p in self.providers), return_exceptions=True)
+        for e in res:
+            if isinstance(e, BaseException):
+                log.warning("search provider failed (%s): %r", query, e)
+        lists = [r for r in res if isinstance(r, list)]
+        out: list[SearchResult] = []
+        seen: set[str] = set()
+        for i in range(max((len(x) for x in lists), default=0)):  # чередуем провайдеров
+            for lst in lists:
+                if i < len(lst) and lst[i].url and lst[i].url not in seen:
+                    seen.add(lst[i].url)
+                    out.append(lst[i])
+        out = out[:limit]
+        self._cache.set(key, out)
+        return list(out)
+
+    async def aclose(self) -> None:
+        for p in self.providers:
+            await p.aclose()
+
+
 _provider: SearchProvider | None = None
 
 
+def build_search_provider() -> SearchProvider:
+    """SEARCH_PROVIDER: mock → Mock; auto → demo: Mock, live: [Tavily|Serper по ключу] + RSS;
+    rss → только RSS; tavily|serper → ключевой + RSS (без ключа — только RSS)."""
+    from app.config import settings
+
+    mode = settings.SEARCH_PROVIDER
+    if mode == "mock" or (mode == "auto" and settings.is_demo):
+        return MockSearchProvider()
+    keyed: list[SearchProvider] = []
+    if mode in ("auto", "tavily") and settings.TAVILY_API_KEY:
+        keyed.append(TavilySearchProvider(settings.TAVILY_API_KEY))
+    elif mode in ("auto", "serper") and settings.SERPER_API_KEY:
+        keyed.append(SerperSearchProvider(settings.SERPER_API_KEY))
+    rss_p = RssSearchProvider()
+    return CompositeSearchProvider([*keyed, rss_p]) if keyed else rss_p
+
+
 def get_search_provider() -> SearchProvider:
-    """SEARCH_PROVIDER=tavily|serper и есть ключ → реальный провайдер, иначе Mock. Синглтон."""
+    """Синглтон (см. ``build_search_provider``)."""
     global _provider
     if _provider is None:
-        from app.config import settings
-
-        if settings.SEARCH_PROVIDER == "tavily" and settings.TAVILY_API_KEY:
-            _provider = TavilySearchProvider(settings.TAVILY_API_KEY)
-        elif settings.SEARCH_PROVIDER == "serper" and settings.SERPER_API_KEY:
-            _provider = SerperSearchProvider(settings.SERPER_API_KEY)
-        else:
-            _provider = MockSearchProvider()
+        _provider = build_search_provider()
     return _provider
 
 

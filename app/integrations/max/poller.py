@@ -8,6 +8,9 @@
   чтобы лента знала «есть телефон»); last_synced_at; commit. ``client`` — клиент MAX (тесты).
 - Telegram опрашивается, если пакет ``app.integrations.telegram`` импортируется И (TG_PROVIDER не
   ``mock`` ИЛИ в БД есть включённые TG-источники). Ошибки Telegram не мешают MAX.
+- RSS-источники (``platform="rss"``) поллер НЕ трогает — их выгружает ``services.sources.sync_rss``
+  (DEV-SOURCES, CONTRACTS_v3 §6).
+- Источники с ``deleted_at`` (мягкое удаление, DEV-SOURCES) не опрашиваются и не пересоздаются.
 - ``ensure_author_profile(session, author_external_id, client=None, platform="max")`` — кэш author_profiles.
 - ``start_poller(interval) -> asyncio.Task``.
 """
@@ -83,6 +86,10 @@ def _known_sources(client: Any) -> set[str]:
     return set(getattr(client, "_sources", {}) or {})
 
 
+def _is_deleted(chat: MaxChat) -> bool:
+    return getattr(chat, "deleted_at", None) is not None
+
+
 # ---------------------------------------------------------------- sync
 async def _sync_platform(session: AsyncSession, platform: str, client: Any, result: SyncResult) -> None:
     try:
@@ -103,8 +110,15 @@ async def _sync_platform(session: AsyncSession, platform: str, client: Any, resu
                            ref=getattr(rc, "url", None) or getattr(rc, "username", None),
                            username=getattr(rc, "username", None), kind=getattr(rc, "kind", None),
                            url=getattr(rc, "url", None))
+            for attr, val in (("subscribers", getattr(rc, "members_count", None)),
+                              ("avatar_url", getattr(rc, "avatar_url", None)),
+                              ("description", getattr(rc, "description", None))):
+                if val is not None and hasattr(MaxChat, attr):
+                    setattr(chat, attr, val)
             session.add(chat)
             existing[rc.external_id] = chat
+        elif _is_deleted(chat):
+            continue  # удалён редактором — не трогаем
         else:
             chat.title = rc.title or chat.title
             chat.district = chat.district or rc.district  # район, заданный вручную, не затираем
@@ -117,7 +131,7 @@ async def _sync_platform(session: AsyncSession, platform: str, client: Any, resu
     if platform == "telegram" and hasattr(client, "add_source"):
         known = _known_sources(client)
         for chat in existing.values():
-            if chat.enabled and chat.external_id not in known:
+            if chat.enabled and not _is_deleted(chat) and chat.external_id not in known:
                 try:
                     await client.add_source(chat.ref or chat.external_id)
                 except Exception as e:  # noqa: BLE001
@@ -129,7 +143,7 @@ async def _sync_platform(session: AsyncSession, platform: str, client: Any, resu
     tg_gate = platform == "telegram" and demo_stream.telegram_gate_active(client)
     new_authors: set[str] = set()
     for chat in existing.values():
-        if not chat.enabled:
+        if not chat.enabled or _is_deleted(chat):
             continue
         result.chats += 1
         since = await session.scalar(

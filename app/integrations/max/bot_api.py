@@ -1,34 +1,32 @@
-"""Реальный клиент MAX Bot API (зона DEV-BACKEND). httpx async.
+"""Реальный клиент MAX Bot API (зона DEV-REALDATA). httpx async.
 
-Документация: https://dev.max.ru/docs-api (база ``https://platform-api.max.ru``; API унаследовано
-от TamTam Bot API). Для демо реального токена нет — клиент изолирован, ни один модуль не
-импортирует его без ``MAX_BOT_TOKEN`` (см. ``client.get_max_client``).
+Документация: https://dev.max.ru/docs-api (сверено 2026-11-15, см. docs/MAX.md). База —
+``https://platform-api2.max.ru`` (с 19.07.2026; TLS-сертификат Минцифры — «Russian Trusted Root CA»,
+его нет в certifi: ``MAX_CA_BUNDLE=<pem>``; без него клиент сам переходит на
+``https://platform-api.max.ru``, пока тот отвечает). Токен — только заголовком
+``Authorization: <token>`` (query-параметр больше не поддерживается). Токен выдаёт платформа
+«MAX для партнёров» (business.max.ru) — только верифицированным юрлицам/ИП/самозанятым РФ.
 
 Что используем:
-- ``GET /chats?count=&marker=`` → ``{"chats": [Chat], "marker": int|null}`` — чаты, где состоит бот.
-- ``GET /messages?chat_id=&count=&to=`` → ``{"messages": [Message]}`` — сообщения чата.
-  ``Message = {sender: User, recipient: {chat_id}, timestamp: ms, link: {type: forward|reply, ...},
-  body: {mid, text, attachments: [{type: image|video|file|contact|..., payload: {...}}]}}``.
+- ``GET /chats`` (устарел с 06.2026, пробуем для совместимости) + ``GET /updates`` (события
+  ``bot_added`` / ``message_created`` → chat_id) + ``MAX_CHAT_IDS`` → ``GET /chats/{chatId}``
+  (title, type chat|channel, link, participants_count, icon).
+- ``GET /messages?chat_id=&count=&to=`` → ``{"messages": [Message]}`` — **только если бот —
+  администратор** чата/канала; новые первыми; ``from``/``to`` — Unix ms.
+  ``Message = {sender, recipient: {chat_id, chat_type}, timestamp: ms, link: {type: forward|reply},
+  body: {mid, text, attachments}, stat: {views} (каналы), url (публичная ссылка на пост канала)}``.
 - ``GET /chats/{chatId}/members?user_ids=...`` → ``{"members": [ChatMember]}`` — профиль участника.
-
-Авторизация: токен в заголовке ``Authorization: <token>`` (текущая рекомендация MAX; старый
-способ — query-параметр ``access_token``, включается ``auth_mode="query"``).
 
 Телефон: Bot API НЕ отдаёт телефон участника. Он известен боту только если пользователь сам
 поделился контактом (вложение ``type=contact`` с собственным ``max_info.user_id``) — такие
-телефоны мы запоминаем при чтении сообщений; либо если в ``ChatMember`` появится поле phone
-(на будущее, берём, если есть). Иначе ``phone=None`` → в UI «телефон скрыт в профиле».
-
-TODO(MAX): сверить с актуальной документацией на реальном токене:
-  * единицы ``from``/``to`` в /messages (считаем миллисекунды, как ``timestamp``) и порядок
-    выдачи (сортируем сами, фильтр ``since`` — на нашей стороне);
-  * формат ``user_ids`` (передаём через запятую);
-  * поля вложений image/video (берём ``payload.url``).
+телефоны мы запоминаем при чтении сообщений. Иначе ``phone=None`` → в UI «телефон скрыт».
+Вложения без ``payload.url`` (видео) → ``has_media=True``, ``media_url=None`` (ссылки не выдумываем).
 """
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -44,6 +42,23 @@ _TEL_RE = re.compile(r"^TEL[^:]*:(.+)$", re.MULTILINE | re.IGNORECASE)
 
 class MaxApiError(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class MaxBotChat(MaxChat):
+    platform: str = "max"
+    username: str | None = None
+    kind: str = "group"  # group | channel
+    url: str | None = None  # публичная ссылка https://max.ru/<name> (если есть)
+    avatar_url: str | None = None
+    description: str | None = None
+
+
+@dataclass(slots=True)
+class MaxBotMessage(MaxMessage):
+    platform: str = "max"
+    url: str | None = None  # Message.url — публичная ссылка на пост канала (у групп нет)
+    views: int | None = None  # Message.stat.views (только каналы)
 
 
 def _ts_to_dt(ts: int | float | None) -> datetime | None:
@@ -76,6 +91,7 @@ def _phone_from_vcf(vcf: str | None) -> str | None:
 
 class MaxBotApiClient(MaxClient):
     name = "bot_api"
+    platform = "max"
 
     def __init__(
         self,
@@ -85,18 +101,34 @@ class MaxBotApiClient(MaxClient):
         timeout: float = 15.0,
         auth_mode: Literal["header", "query"] = "header",
         transport: httpx.AsyncBaseTransport | None = None,
+        fallback_base_url: str | None = None,
+        verify: Any = True,
+        chat_ids: list[str] | None = None,
     ) -> None:
         self.token = token
         self.base_url = base_url.rstrip("/")
+        self.fallback_base_url = (fallback_base_url or "").rstrip("/") or None
         self.auth_mode = auth_mode
-        headers = {"Authorization": token} if auth_mode == "header" else {}
-        self._http = httpx.AsyncClient(
-            base_url=self.base_url, headers=headers, timeout=timeout, transport=transport
-        )
+        self._timeout = timeout
+        self._transport = transport
+        self._verify = verify
+        self._http = self._make_http(self.base_url)
         # user_id -> chat_id, где видели автора (нужно для /chats/{id}/members)
         self._user_chat: dict[str, str] = {}
         # user_id -> телефон, которым пользователь сам поделился (вложение contact)
         self._shared_phones: dict[str, str] = {}
+        # chat_id чатов/каналов: MAX_CHAT_IDS + найденные в /updates (bot_added, message_created)
+        self._known_chats: set[str] = {str(c).strip() for c in (chat_ids or []) if str(c).strip()}
+        self._updates_marker: Any = None
+        self.last_error: str | None = None
+
+    def _make_http(self, base: str) -> httpx.AsyncClient:
+        headers = {"Authorization": self.token} if self.auth_mode == "header" else {}
+        kw: dict[str, Any] = {"base_url": base, "headers": headers, "timeout": self._timeout,
+                              "transport": self._transport}
+        if self._transport is None:
+            kw["verify"] = self._verify
+        return httpx.AsyncClient(**kw)
 
     # ------------------------------------------------------------ http
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -105,6 +137,18 @@ class MaxBotApiClient(MaxClient):
             params["access_token"] = self.token
         try:
             r = await self._http.get(path, params=params)
+        except httpx.ConnectError as e:
+            # platform-api2 подписан сертификатом Минцифры (Russian Trusted Root CA), которого нет в
+            # certifi. Без MAX_CA_BUNDLE переключаемся на platform-api (пока он работает).
+            if self.fallback_base_url and "CERTIFICATE_VERIFY_FAILED" in repr(e) \
+                    and self.base_url != self.fallback_base_url:
+                log.warning("MAX %s: TLS не прошёл (нужен MAX_CA_BUNDLE с сертификатом Минцифры) — "
+                            "переключаюсь на %s", self.base_url, self.fallback_base_url)
+                await self._http.aclose()
+                self.base_url = self.fallback_base_url
+                self._http = self._make_http(self.base_url)
+                return await self._get(path, params)
+            raise MaxApiError(f"MAX {path}: {e!r}") from e
         except httpx.HTTPError as e:
             raise MaxApiError(f"MAX {path}: {e!r}") from e
         if r.status_code >= 400:
@@ -118,28 +162,80 @@ class MaxBotApiClient(MaxClient):
         await self._http.aclose()
 
     # ------------------------------------------------------------ chats
+    @staticmethod
+    def _to_chat(c: dict[str, Any]) -> MaxChat | None:
+        ctype = c.get("type")
+        if ctype not in (None, "chat", "channel"):  # личные диалоги не интересны
+            return None
+        if c.get("status") not in (None, "active"):
+            return None
+        link = c.get("link") or None
+        username = None
+        if isinstance(link, str) and "max.ru/" in link:
+            tail = link.rstrip("/").rsplit("max.ru/", 1)[1]
+            username = tail if "/" not in tail else None
+        return MaxBotChat(
+            external_id=str(c["chat_id"]),
+            title=c.get("title") or f"Чат {c['chat_id']}",
+            district=None,  # в MAX нет — редактор задаёт вручную
+            members_count=c.get("participants_count"),
+            kind="channel" if ctype == "channel" else "group",
+            url=link if isinstance(link, str) and link.startswith("http") else None,
+            username=username,
+            avatar_url=((c.get("icon") or {}).get("url") if isinstance(c.get("icon"), dict) else None),
+            description=c.get("description"),
+        )
+
+    async def poll_updates(self) -> int:
+        """Long polling без ожидания (``timeout=0``): узнаём chat_id из событий bot_added /
+        message_created (GET /chats с 06.2026 не поддерживается). Возвращает число новых chat_id."""
+        before = len(self._known_chats)
+        data = await self._get("/updates", {"marker": self._updates_marker, "timeout": 0, "limit": 100,
+                                            "types": "bot_added,message_created,bot_removed"})
+        for u in data.get("updates") or []:
+            utype = u.get("update_type")
+            cid = u.get("chat_id") or ((u.get("message") or {}).get("recipient") or {}).get("chat_id")
+            if cid is None:
+                continue
+            if utype == "bot_removed":
+                self._known_chats.discard(str(cid))
+            else:
+                self._known_chats.add(str(cid))
+        self._updates_marker = data.get("marker", self._updates_marker)
+        return len(self._known_chats) - before
+
     async def list_chats(self) -> list[MaxChat]:
-        chats: list[MaxChat] = []
+        chats: dict[str, MaxChat] = {}
+        legacy_error: MaxApiError | None = None
         marker: Any = None
-        for _ in range(50):  # защита от бесконечной пагинации
-            data = await self._get("/chats", {"count": PAGE, "marker": marker})
-            for c in data.get("chats") or []:
-                if c.get("type") not in (None, "chat"):  # диалоги и каналы не интересны
-                    continue
-                if c.get("status") not in (None, "active"):
-                    continue
-                chats.append(
-                    MaxChat(
-                        external_id=str(c["chat_id"]),
-                        title=c.get("title") or f"Чат {c['chat_id']}",
-                        district=None,  # в MAX нет — оператор правит вручную (TODO)
-                        members_count=c.get("participants_count"),
-                    )
-                )
-            marker = data.get("marker")
-            if not marker:
-                break
-        return chats
+        try:  # устаревший GET /chats (до 06.2026) — если ещё отвечает, используем
+            for _ in range(50):  # защита от бесконечной пагинации
+                data = await self._get("/chats", {"count": PAGE, "marker": marker})
+                for c in data.get("chats") or []:
+                    chat = self._to_chat(c)
+                    if chat is not None:
+                        chats[chat.external_id] = chat
+                marker = data.get("marker")
+                if not marker:
+                    break
+        except MaxApiError as e:
+            legacy_error = e
+        try:
+            await self.poll_updates()
+        except MaxApiError as e:
+            log.debug("MAX /updates: %s", e)
+        for cid in sorted(self._known_chats - set(chats)):
+            try:
+                chat = self._to_chat(await self._get(f"/chats/{cid}"))
+            except MaxApiError as e:
+                self.last_error = f"chat {cid}: {e}"
+                log.warning("MAX GET /chats/%s: %s", cid, e)
+                continue
+            if chat is not None:
+                chats[chat.external_id] = chat
+        if not chats and legacy_error is not None and not self._known_chats:
+            raise legacy_error
+        return list(chats.values())
 
     # ------------------------------------------------------------ messages
     def _parse_message(self, m: dict[str, Any], chat_id: str) -> MaxMessage | None:
@@ -160,12 +256,13 @@ class MaxBotApiClient(MaxClient):
         author_id = str(sender.get("user_id", ""))
 
         media_url = None
+        has_media = False
         for a in attachments:
             atype = a.get("type")
             payload = a.get("payload") or {}
-            if atype in ("image", "video", "file") and media_url is None:
-                media_url = payload.get("url")  # TODO(MAX): для video url может отсутствовать
-                media_url = media_url or f"max://attachment/{atype}/{payload.get('token') or mid}"
+            if atype in ("image", "video", "file") and not has_media:
+                media_url = payload.get("url")  # у video url может не быть — тогда только has_media
+                has_media = True
             elif atype == "contact":
                 info = payload.get("max_info") or {}
                 # Телефон берём, только если человек поделился СВОИМ контактом.
@@ -175,18 +272,21 @@ class MaxBotApiClient(MaxClient):
                         self._shared_phones[author_id] = phone
         if author_id:
             self._user_chat[author_id] = chat_id
-        if not text and media_url is None:
+        if not text and not has_media:
             return None
-        return MaxMessage(
+        stat = m.get("stat") or {}
+        return MaxBotMessage(
             external_id=str(mid),
             chat_external_id=chat_id,
             author_external_id=author_id,
             author_name=_user_name(sender),
             text=text,
             sent_at=sent_at,
-            has_media=media_url is not None,
+            has_media=has_media,
             media_url=media_url,
             is_forwarded=is_forwarded,
+            url=m.get("url") or None,  # публичная ссылка на пост (только каналы)
+            views=stat.get("views") if isinstance(stat, dict) else None,
         )
 
     async def fetch_messages(

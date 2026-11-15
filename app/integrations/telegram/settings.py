@@ -17,9 +17,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class TelegramSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # mock (по умолчанию) | telethon | bot | web | auto (лучший из доступных)
-    TG_PROVIDER: Literal["auto", "telethon", "bot", "web", "mock"] = "mock"
+    # auto (по умолчанию): telethon → bot → DATA_MODE=live: web | demo: mock; либо явно
+    TG_PROVIDER: Literal["auto", "telethon", "bot", "web", "mock"] = "auto"
     # Источники: @username / t.me-ссылки / username через запятую (для telethon и web).
+    # Пусто в DATA_MODE=live → стартовый набор LIVE_DEFAULT_SOURCES.
     TG_SOURCES: str = ""
 
     # --- Telethon (MTProto, пользовательская сессия) ---
@@ -46,7 +47,10 @@ class TelegramSettings(BaseSettings):
 
     @property
     def sources(self) -> list[str]:
-        return [s.strip() for s in self.TG_SOURCES.replace(";", ",").split(",") if s.strip()]
+        own = [s.strip() for s in self.TG_SOURCES.replace(";", ",").split(",") if s.strip()]
+        if own:
+            return own
+        return list(LIVE_DEFAULT_SOURCES) if _is_live() else []
 
     @property
     def session_file(self) -> Path:
@@ -56,6 +60,27 @@ class TelegramSettings(BaseSettings):
     @property
     def has_telethon_keys(self) -> bool:
         return bool(self.TG_API_ID and self.TG_API_HASH)
+
+
+# Стартовый набор для DATA_MODE=live: реальные публичные московские новостные каналы, у которых
+# открыто веб-превью t.me/s (проверено запросом 2026-11-15: HTTP 200, лента постов, свежие посты).
+LIVE_DEFAULT_SOURCES: tuple[str, ...] = (
+    "@moscowmap",          # Новости Москвы (~2,6 млн)
+    "@moscowach",          # Москвач • Новости Москвы (~3,9 млн)
+    "@infomoscow24",       # Москва 24 (~490 тыс.)
+    "@ostorozhno_moskva",  # Осторожно, Москва (~400 тыс.)
+    "@msk1_news",          # MSK1.RU | Новости Москвы (~116 тыс.)
+    "@mos_sobyanin",       # Мэр Москвы Сергей Собянин (~370 тыс.) — официальный
+)
+
+
+def _is_live() -> bool:
+    try:
+        from app.config import settings
+
+        return settings.DATA_MODE == "live"
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @lru_cache

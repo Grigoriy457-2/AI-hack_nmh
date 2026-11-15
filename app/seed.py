@@ -12,6 +12,10 @@ main.py вызывает ``seed_if_empty`` (если users пуста).
   статистика не были пустыми на демо. Статусы v1 в спецификациях HISTORY отображаются на v2
   (``_V1_STATUS``), логины v1 — на editor/editor2 (``_V1_USER``).
   Сценарий «Чертаново, хлопок ~14:30» НЕ сеется — его запускают вживую.
+
+v3 (TZ_v3, CONTRACTS_v3 §5): при ``DATA_MODE=live`` синтетика не сеется — только редакторы, каналы
+Channel DNA и стартовые реальные источники (``live_start_sources()``: каталог DEV-REALDATA
+``default_live_sources()`` или списки из config). ``DATA_MODE=demo`` — как раньше.
 """
 from __future__ import annotations
 
@@ -571,7 +575,119 @@ async def _seed_dna(session: AsyncSession, channels: list[Channel]) -> None:
         await session.rollback()
 
 
-async def seed(session: AsyncSession, *, with_history: bool = True, with_max: bool = True) -> None:
+_CATALOG_FUNCS = (  # стартовые реальные источники DEV-REALDATA (первая найденная функция)
+    ("app.integrations.catalog", "default_live_sources"),
+    ("app.integrations.rss", "default_live_sources"),
+    ("app.integrations.live_sources", "default_live_sources"),
+    ("app.integrations.sources_catalog", "default_live_sources"),
+    ("app.integrations.feeds", "default_live_sources"),
+)
+_CATALOG_SETTINGS = (  # или списки в config (str через запятую или list)
+    ("LIVE_SOURCES", None), ("LIVE_TG_SOURCES", "telegram"), ("TG_DEFAULT_SOURCES", "telegram"),
+    ("TG_SOURCES", "telegram"), ("MAX_SOURCES", "max"), ("MAX_PUBLIC_CHANNELS", "max"),
+    ("RSS_SOURCES", "rss"),  # RSS_FEEDS — ленты для поиска (DEV-REALDATA), не источники «Радара»
+)
+
+
+def _as_items(value: Any, platform: str | None) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [v.strip() for v in value.replace("\n", ",").split(",") if v.strip()]
+    out = []
+    for v in value:
+        if isinstance(v, str):
+            out.append({"platform": platform, "ref": v})
+        elif isinstance(v, dict):
+            out.append({"platform": v.get("platform") or platform, **{k: x for k, x in v.items() if k != "platform"}})
+        else:  # dataclass / объект
+            out.append({"platform": getattr(v, "platform", platform), "ref": getattr(v, "ref", None) or getattr(v, "url", None),
+                        "title": getattr(v, "title", None), "district": getattr(v, "district", None)})
+    return out
+
+
+def live_start_sources() -> list[dict[str, Any]]:
+    """Стартовые реальные источники для DATA_MODE=live: функция каталога DEV-REALDATA
+    (``default_live_sources() -> list[{platform, ref, title?, district?}]``) или списки в config."""
+    import importlib
+
+    from app.config import settings
+
+    for mod_name, fn_name in _CATALOG_FUNCS:
+        try:
+            fn = getattr(importlib.import_module(mod_name), fn_name, None)
+        except ImportError:
+            continue
+        except Exception:  # noqa: BLE001
+            log.exception("catalog %s import failed", mod_name)
+            continue
+        if callable(fn):
+            try:
+                return _as_items(fn(), None)
+            except Exception:  # noqa: BLE001
+                log.exception("catalog %s.%s failed", mod_name, fn_name)
+    items: list[dict[str, Any]] = []
+    for attr, platform in _CATALOG_SETTINGS:
+        items += _as_items(getattr(settings, attr, None), platform)
+    return items
+
+
+async def _seed_live_sources(session: AsyncSession, users: dict[str, User]) -> int:
+    """Записать стартовые источники без сети (название уточнит поллер / resolve). Возвращает число."""
+    from app.models import MaxChat
+    from app.services.sources import _max_slug, _norm_url, detect_platform, rss_external_id
+
+    added, seen = 0, set()
+    editor = users.get("editor")
+    for it in live_start_sources():
+        ref = str(it.get("ref") or it.get("url") or "").strip()
+        if not ref:
+            continue
+        platform = it.get("platform") or detect_platform(ref)
+        extra: dict[str, Any] = {}
+        try:
+            if platform == "telegram":
+                from app.services.sources import _tg_username
+
+                username = _tg_username(ref)
+                ext, title = f"tg:{username}", f"@{username}"
+                extra = {"username": username, "url": f"https://t.me/{username}"}
+            elif platform == "max":
+                ext = _max_slug(ref) or ref
+                title = ext
+                extra = {"url": ref if "max.ru" in ref.lower() else None}
+            elif platform == "rss":
+                url = _norm_url(ref)
+                ext, title = rss_external_id(url), url.split("/")[2]
+                extra = {"url": url, "kind": "feed", "site_url": it.get("site_url")}
+            else:
+                continue
+        except Exception as e:  # noqa: BLE001
+            log.warning("live source %r skipped: %s", ref, e)
+            continue
+        if (platform, ext) in seen:
+            continue
+        seen.add((platform, ext))
+        session.add(MaxChat(platform=platform, external_id=ext[:128], ref=ref[:255],
+                            title=str(it.get("title") or title)[:255], district=it.get("district"),
+                            enabled=True, added_by_id=editor.id if editor else None, created_at=utcnow(),
+                            **{k: v for k, v in extra.items() if v}))
+        added += 1
+    await session.commit()
+    return added
+
+
+async def seed(session: AsyncSession, *, with_history: bool | None = None, with_max: bool | None = None,
+               mode: str | None = None) -> None:
+    """demo: редакторы, каналы, исторические сюжеты, mock-сообщения MAX/TG.
+    live (TZ_v3): только редакторы, каналы Channel DNA и стартовые реальные источники — без синтетики."""
+    from app.services.sources import data_mode
+
+    mode = (mode or data_mode()).lower()
+    live = mode == "live"
+    with_history = (not live) if with_history is None else with_history
+    with_max = (not live) if with_max is None else with_max
+
     users = {u["login"]: User(**u) for u in SEED_USERS}
     session.add_all(users.values())
     channels = {c["handle"]: Channel(**c) for c in SEED_CHANNELS}
@@ -585,6 +701,13 @@ async def seed(session: AsyncSession, *, with_history: bool = True, with_max: bo
     await session.commit()
 
     await _seed_dna(session, list(channels.values()))
+    if live:
+        try:
+            n = await _seed_live_sources(session, users)
+            log.info("Seed live: %s стартовых реальных источников", n)
+        except Exception:  # noqa: BLE001
+            log.exception("Seed live sources failed")
+            await session.rollback()
     if with_max:
         await _seed_max(session)
 
@@ -601,6 +724,10 @@ async def seed_if_empty(session: AsyncSession) -> bool:
 async def _main(reset: bool) -> None:
     logging.basicConfig(level=logging.INFO)
     await db.init_db(drop=reset)  # init_db сам пересоздаёт схему v1
+    from app.models import add_missing_columns
+
+    async with db.engine.begin() as conn:  # v3: новые колонки в существующих таблицах
+        await conn.run_sync(add_missing_columns)
     async with db.session_scope() as session:
         done = await seed_if_empty(session)
     await db.dispose()

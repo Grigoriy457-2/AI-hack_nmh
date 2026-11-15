@@ -7,6 +7,10 @@
 4. Карточка — тема с ≥ EMERGING_MIN_MESSAGES сообщений в окне EMERGING_WINDOW_MIN минут.
 
 Результат анализа кэшируется по (max id, число сообщений, число профилей с телефоном).
+
+DATA_MODE=live (реальные TG-каналы и RSS-ленты СМИ — длинные тексты): темы строятся по «стемам»
+заголовка/первых ``LIVE_TOPIC_CHARS`` символов, всегда нужно ≥ 3 общих стема, частые слова окна —
+от ``LIVE_COMMON_DF_SHARE``, слияние «по чату/району» (для домовых чатов) не применяется.
 """
 from __future__ import annotations
 
@@ -44,6 +48,8 @@ COMMON_DF_SHARE = 0.25  # стем встречается в >25% сообщен
 RECENT = timedelta(minutes=10)
 FADING_AFTER = timedelta(minutes=30)
 TREND_LABELS = {"rising": "растёт", "steady": "стабильно", "fading": "затихает"}
+LIVE_TOPIC_CHARS = 220
+LIVE_COMMON_DF_SHARE = 0.08
 
 
 @dataclass
@@ -82,9 +88,14 @@ def _important(text: str, has_media: bool) -> bool:
     return uq.is_important_heuristic(text, has_media)
 
 
-def message_url(m: ChatMessage, chat: MaxChat) -> str:
+def message_url(m: ChatMessage, chat: MaxChat) -> str | None:
+    """Ссылка «открыть»: реальная ссылка сообщения; в live без неё — публичная страница источника
+    (t.me/<name>, max.ru/<name>) или None. Внутренние max://-ссылки — только DATA_MODE=demo."""
     if m.message_url:
         return m.message_url
+    if not settings.is_demo:
+        url = getattr(chat, "url", None)
+        return url if url and url.startswith("http") and (chat.platform or "max") != "rss" else None
     if (chat.platform or "max") == "max":
         return md.max_message_url(chat.external_id, m.external_id)
     return f"{chat.platform}://chat/{chat.external_id}/{m.external_id}"
@@ -156,10 +167,16 @@ async def analyze(session: AsyncSession, *, force: bool = False) -> Analysis:
         for it in c.items:
             dsu.union(c.items[0].id, it.id)
     n = len(rows)
-    df = Counter(s for info in an.infos.values() for s in info.stems)
-    common = {s for s, k in df.items() if n >= 8 and k / n > COMMON_DF_SHARE}
+    live = not settings.is_demo
+    if live:  # длинные посты/статьи: тема — по заголовку (началу текста)
+        head_stems = {m.id: {stem(w) for w in text_words((m.text or "")[:LIVE_TOPIC_CHARS])} for m, _ in rows}
+    else:
+        head_stems = {mid: info.stems for mid, info in an.infos.items()}
+    df = Counter(s for st in head_stems.values() for s in st)
+    share = LIVE_COMMON_DF_SHARE if live else COMMON_DF_SHARE
+    common = {s for s, k in df.items() if n >= 8 and k / n > share}
     ids = [m.id for m, _ in rows]
-    topic_stems = {mid: an.infos[mid].stems - common for mid in ids}
+    topic_stems = {mid: head_stems[mid] - common for mid in ids}
     an.common = common
     for i, a in enumerate(ids):
         sa, ta = topic_stems[a], an.infos[a].msg.sent_at
@@ -172,12 +189,13 @@ async def analyze(session: AsyncSession, *, force: bool = False) -> Analysis:
                 continue
             imp_b = bool(an.infos[b].uniq and an.infos[b].uniq.is_important)
             # 2 общих «стема» достаточно только для двух важных сообщений; иначе нужно ≥ 3
-            if shared >= STRONG_SHARED_STEMS or (imp_a and imp_b):
+            if shared >= STRONG_SHARED_STEMS or (imp_a and imp_b and not live):
                 dsu.union(a, b)
     topics: dict[int, list[int]] = {}
     for mid in ids:
         topics.setdefault(dsu.find(mid), []).append(mid)
-    topics = _merge_nearby(an, topics)
+    if not live:
+        topics = _merge_nearby(an, topics)
     for root, members in topics.items():
         for mid in members:
             an.infos[mid].topic = root

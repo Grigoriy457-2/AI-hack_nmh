@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel>
+  <title>"автобус Варшавское шоссе" - Google Новости</title>
+  <link>https://news.google.com/search?q=QA&amp;hl=ru&amp;gl=RU&amp;ceid=RU:ru</link>
+  <item>
+    <title>В Москве на Варшавском шоссе загорелся автобус - Городские новости QA</title>
+    <link>https://news.google.com/rss/articles/CBMiQUFVX3lxTFFBX05FV19GT1JNQVRfSUQ?oc=5</link>
+    <guid isPermaLink="false">CBMiQUFVX3lxTFFBX05FV19GT1JNQVRfSUQ</guid>
+    <pubDate>__PUB1__</pubDate>
+    <description>&lt;a href="https://news.google.com/rss/articles/x"&gt;В Москве на Варшавском шоссе загорелся автобус&lt;/a&gt;</description>
+    <source url="https://qa-news.example">Городские новости QA</source>
+  </item>
+  <item>
+    <title>Автобус сгорел на Варшавском шоссе в Москве - Вести QA</title>
+    <link>https://news.google.com/rss/articles/__OLDFORMAT__?oc=5</link>
+    <guid isPermaLink="false">qa-old</guid>
+    <pubDate>__PUB2__</pubDate>
+    <description>Автобус сгорел на Варшавском шоссе в Москве</description>
+    <source url="https://vesti-qa.example">Вести QA</source>
+  </item>
+  <item>
+    <title>Загорелся автобус на Варшавском шоссе в Москве: подробности - Другое издание QA</title>
+    <link>https://news.google.com/rss/articles/CBMiQUFVX3lxTE5PVF9SRVNPTFZFRA?oc=5</link>
+    <guid isPermaLink="false">qa-unresolved</guid>
+    <pubDate>__PUB2__</pubDate>
+    <source url="https://other-qa.example">Другое издание QA</source>
+  </item>
+</channel>
+</rss>

@@ -24,6 +24,12 @@ run_investigation(id)``). Пайплайн открывает СВОИ сесс�
 Повторный запуск удаляет прошлые итерации/источники/медиа/справку;
 черновики сохраняются, новый AI-черновик получает следующий номер версии.
 
+Реальные данные (TZ_v3, DATA_MODE=live): агенты ищут по Google News RSS + RSS-лентам СМИ/ведомств
+(+ Tavily/Serper по ключу) и по реальным сообщениям Telegram/MAX в БД; без ANTHROPIC_API_KEY анализ
+экстрактивный (``app.ai.extractive``): справка и черновик — только цитаты найденных источников с их
+source_id; ссылки — только из ответов источников (для сообщений без публичной ссылки url=None);
+медиа — только реальные (enclosure RSS, og:image, превью t.me). Сценарий «Чертаново» — только demo.
+
 Демо-паузы: в mock-режиме LLM и без PIPELINE_INLINE между шагами есть ``asyncio.sleep`` (всего
 ~12–15 с), чтобы на странице был виден живой прогресс. ``DEMO_DELAY_SCALE = 0`` — отключить.
 """
@@ -42,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import db
 from app.ai import mock_data as md
 from app.ai import prompts
-from app.ai.llm import MockLLM, get_llm
+from app.ai.llm import MockLLM, fallback_llm, get_llm
 from app.ai.text import first_sentence, hhmm_msk, stems
 from app.config import settings
 from app.integrations.search import OFFICIAL_DOMAINS, SearchResult, get_search_provider, is_official_url
@@ -83,8 +89,10 @@ STAGE_PERCENT: dict[str, tuple[int, int]] = {
 }
 
 AGENTS: tuple[str, ...] = ("web", "max_chats", "official", "media")
-AGENT_LABELS = {"web": "СМИ и Telegram", "max_chats": "Домовые чаты MAX", "official": "Официальные источники", "media": "Фото и видео"}
-KIND_LABELS = {"web": "СМИ/ТГ", "max_chat": "Чат MAX", "official": "Официально", "media": "Медиа"}
+AGENT_LABELS = {"web": "СМИ (Google News, RSS)", "max_chats": "Чаты и каналы MAX/Telegram",
+                "official": "Официальные источники", "media": "Фото и видео"}
+KIND_LABELS = {"web": "СМИ", "max_chat": "Чат/канал", "official": "Официально", "media": "Медиа"}
+PLATFORM_KIND_LABELS = {"max": "Чат MAX", "telegram": "Telegram", "rss": "СМИ (RSS)"}
 
 REPORT_SECTIONS: list[tuple[str, str]] = [
     ("summary", "Краткое описание ситуации"),
@@ -158,10 +166,11 @@ async def _llm_json(task: str, payload: dict[str, Any]) -> dict[str, Any]:
             return res
         raise ValueError("LLM returned non-dict")
     except Exception as e:  # noqa: BLE001
-        if isinstance(llm, MockLLM):
+        if llm.name in ("mock", "extractive"):
             raise
-        log.warning("LLM task %s failed: %r — using MockLLM", task, e)
-        return await MockLLM().complete_json(system, user, schema, task=task)
+        fb = fallback_llm()
+        log.warning("LLM task %s failed: %r — using %s", task, e, fb.name)
+        return await fb.complete_json(system, user, schema, task=task)
 
 
 # ---------------------------------------------------------------- запуск
@@ -497,20 +506,30 @@ def _save_results(session: AsyncSession, ctx: PipelineContext, q: dict[str, str]
             if mid in ctx.seen_messages:
                 continue
             ctx.seen_messages.add(mid)
-            url = r.get("message_url") or md.max_message_url(r["chat_external_id"], r["external_id"])
-            ctx.seen_urls.add(url)
+            url = r.get("message_url") or (md.max_message_url(r["chat_external_id"], r["external_id"])
+                                           if settings.is_demo else None)  # live: ссылок не выдумываем
+            if url and url in ctx.seen_urls:
+                continue
+            if url:
+                ctx.seen_urls.add(url)
+            plat = r.get("platform") or "max"
+            who = r.get("author_name") or ("участник чата" if plat == "max" else r["chat_title"])
             src = Source(
                 investigation_id=ctx.investigation_id, kind=SourceKind.max_chat,
-                title=f"{r['chat_title']} · {r.get('author_name') or 'участник чата'}"[:512],
+                title=(f"{r['chat_title']} · {who}" if who != r["chat_title"] else r["chat_title"])[:512],
                 url=url, snippet=r["text"], published_at=r["sent_at"], chat_message_id=mid,
                 iteration_n=n, query=q["query"][:512],
             )
             meta = {"kind": "max_chat", "text": r["text"], "has_media": r["has_media"], "media_url": r["media_url"],
                     "is_forwarded": r["is_forwarded"], "author_external_id": r["author_external_id"],
-                    "author_name": r.get("author_name"), "chat_title": r["chat_title"], "sent_at": r["sent_at"]}
+                    "chat_external_id": r["chat_external_id"],
+                    "author_name": r.get("author_name"), "chat_title": r["chat_title"], "sent_at": r["sent_at"],
+                    "platform": plat, "outlet": f"{PLATFORM_KIND_LABELS.get(plat, plat)} «{r['chat_title']}»"}
         else:
             if not isinstance(r, SearchResult) or not r.url or r.url in ctx.seen_urls:
                 continue
+            if settings.is_live and not _lead_relevant(ctx, f"{r.title or ''} {r.snippet or ''}"):
+                continue  # поиск по RSS/Google News даёт и посторонние материалы — отсекаем по зацепке
             ctx.seen_urls.add(r.url)
             kind = {"web": SourceKind.web, "official": SourceKind.official, "media": SourceKind.media}[agent]
             src = Source(
@@ -521,6 +540,7 @@ def _save_results(session: AsyncSession, ctx: PipelineContext, q: dict[str, str]
             meta = {"kind": kind.value, "text": r.snippet or r.title, "has_media": bool(r.media_urls),
                     "media_url": r.media_urls[0] if r.media_urls else None, "is_forwarded": False,
                     "sent_at": r.published_at, "title": r.title, "source_type": r.source_type,
+                    "outlet": r.extra.get("outlet") or _host(r.url), "via": r.extra.get("via"),
                     "media": list(r.extra.get("media") or [
                         {"kind": "photo", "url": u, "thumbnail_url": u, "captured_at": None, "note": None}
                         for u in r.media_urls])}
@@ -542,6 +562,26 @@ async def _register_pending(session: AsyncSession, ctx: PipelineContext) -> None
     ctx.pending = []
 
 
+def _lead_relevant(ctx: PipelineContext, text: str) -> bool:
+    """live: материал относится к зацепке (≥ relevance_need общих «стемов» с зацепкой,
+    ключевыми словами и вопросами редактора)."""
+    from app.ai.extractive import is_relevant, lead_vocab, location_vocab, mentions_location
+
+    if not mentions_location(text, location_vocab(ctx.lead_text)):
+        return False  # зацепка про Москву/конкретное место, материал — про другой регион
+    vocab = lead_vocab(ctx.lead_text, list(ctx.entities.get("keywords") or []))
+    if ctx.questions:  # «Копать глубже»: вопрос редактора тоже задаёт тему
+        if is_relevant(text, lead_vocab(ctx.questions[-1])):
+            return True
+    return is_relevant(text, vocab)
+
+
+def _host(url: str | None) -> str | None:
+    from app.integrations.webutil import host_of
+
+    return host_of(url) if url else None
+
+
 # ---------------------------------------------------------------- агенты поиска
 async def agent_web(query: str, ctx: PipelineContext) -> list[SearchResult]:
     res = await get_search_provider().search(query, limit=8)
@@ -551,11 +591,11 @@ async def agent_web(query: str, ctx: PipelineContext) -> list[SearchResult]:
 async def _ensure_chat_pool(session: AsyncSession, ctx: PipelineContext) -> None:
     if ctx.chat_pool is not None:
         return
-    rows = (await session.execute(
-        select(ChatMessage, MaxChat).join(MaxChat, ChatMessage.chat_id == MaxChat.id)
-        .where(MaxChat.enabled.is_(True), ChatMessage.archived.is_(False))
-        .order_by(ChatMessage.sent_at.desc()).limit(1000)
-    )).all()
+    # RSS-записи ищет агент web (по самим лентам), здесь — только чаты/каналы MAX и Telegram
+    pool_q = (select(ChatMessage, MaxChat).join(MaxChat, ChatMessage.chat_id == MaxChat.id)
+              .where(MaxChat.enabled.is_(True), ChatMessage.archived.is_(False), MaxChat.platform != "rss")
+              .order_by(ChatMessage.sent_at.desc()).limit(1000))
+    rows = (await session.execute(pool_q)).all()
     if not rows:
         total = await session.scalar(select(func.count()).select_from(ChatMessage))
         if not total:
@@ -564,11 +604,7 @@ async def _ensure_chat_pool(session: AsyncSession, ctx: PipelineContext) -> None
 
                 res = await sync_once(session)
                 await _log(session, ctx, "search", f"Синхронизация MAX: новых сообщений {res.new_messages}")
-                rows = (await session.execute(
-                    select(ChatMessage, MaxChat).join(MaxChat, ChatMessage.chat_id == MaxChat.id)
-                    .where(MaxChat.enabled.is_(True), ChatMessage.archived.is_(False))
-                    .order_by(ChatMessage.sent_at.desc()).limit(1000)
-                )).all()
+                rows = (await session.execute(pool_q)).all()
             except Exception as e:  # noqa: BLE001
                 log.warning("MAX sync before search failed: %r", e)
     ctx.chat_pool = [{
@@ -627,6 +663,7 @@ def _src_payload(ctx: PipelineContext, sid: int) -> dict[str, Any]:
         "is_primary": bool(u.is_primary) if u else True, "cluster_id": u.cluster_id if u else None,
         "uniqueness": u.uniqueness_score if u else None, "is_important": bool(u.is_important) if u else False,
         "is_forwarded": bool(meta.get("is_forwarded")), "has_media": bool(meta.get("has_media")),
+        "outlet": meta.get("outlet"), "platform": meta.get("platform"),
     }
 
 
@@ -659,7 +696,9 @@ async def stage_intelligence(session: AsyncSession, ctx: PipelineContext) -> Non
     await _pause(0.6)
 
     # «Кому позвонить»: первоисточники из MAX с uniqueness >= 0.5 и is_important
-    selected = [sid for sid in uq.select_unique_important(ctx.uniq) if ctx.sources[sid].kind == SourceKind.max_chat]
+    selected = [sid for sid in uq.select_unique_important(ctx.uniq) if ctx.sources[sid].kind == SourceKind.max_chat
+                # пост канала (автор = сам канал) — не очевидец, звонить некому
+                and ctx.src_meta[sid].get("author_external_id") != ctx.src_meta[sid].get("chat_external_id")]
     selected.sort(key=lambda sid: ctx.sources[sid].published_at or datetime.max)
     for sid in selected:
         meta = ctx.src_meta[sid]
@@ -671,7 +710,7 @@ async def stage_intelligence(session: AsyncSession, ctx: PipelineContext) -> Non
             "has_phone": bool(prof and prof.phone), "username": prof.username if prof else None,
             "quote": s.snippet, "chat_title": meta.get("chat_title"), "sent_at": _iso(s.published_at),
             "time_msk": hhmm_msk(s.published_at), "message_url": s.url,
-            "uniqueness_score": ctx.uniq[sid].uniqueness_score,
+            "uniqueness_score": ctx.uniq[sid].uniqueness_score, "platform": meta.get("platform") or "max",
         })
     if selected:
         with_phone = sum(1 for c in ctx.contacts if c["has_phone"])
@@ -684,7 +723,7 @@ async def stage_intelligence(session: AsyncSession, ctx: PipelineContext) -> Non
     })
     ctx.intelligence = _normalize_intel(intel, set(ids))
     if not ctx.intelligence.get("summary"):
-        mock = await MockLLM().complete_json("", json.dumps({"lead_text": ctx.lead_text, "entities": ctx.entities,
+        mock = await fallback_llm().complete_json("", json.dumps({"lead_text": ctx.lead_text, "entities": ctx.entities,
                                                               "sources": [_src_payload(ctx, i) for i in ids]},
                                                              ensure_ascii=False, default=str), task="intelligence")
         ctx.intelligence = _normalize_intel(mock, set(ids))
@@ -760,6 +799,16 @@ def _norm_items(raw: Any, valid: set[int], *, default_state: str | None, keep_em
 
 
 def _normalize_intel(raw: dict[str, Any], valid: set[int]) -> dict[str, Any]:
+    out = _normalize_intel_items(raw, valid)
+    if settings.is_live:  # каждое утверждение — со ссылкой на реальный источник (TZ_v3 п.5)
+        for key in ("timeline", "facts", "confirmed", "unconfirmed", "contradictions"):
+            out[key] = [i for i in out[key] if i["source_ids"]]
+    notes = raw.get("notes") if isinstance(raw.get("notes"), dict) else {}
+    out["notes"] = {str(k): str(v) for k, v in notes.items() if v}
+    return out
+
+
+def _normalize_intel_items(raw: dict[str, Any], valid: set[int]) -> dict[str, Any]:
     return {
         "title": str(raw.get("title") or "").strip(),
         "headline": str(raw.get("headline") or raw.get("title") or "").strip(),
@@ -791,13 +840,22 @@ async def stage_media(session: AsyncSession, ctx: PipelineContext) -> None:
             url = meta.get("media_url")
             if not meta.get("has_media") or not url or url in seen or (u and not u.is_primary):
                 continue
+            if settings.is_live and (not url.startswith("http") or _host(url) in ("t.me", "telegram.me")):
+                continue  # ссылка на сам пост, а не на файл медиа
             seen.add(url)
             kind = _media_kind(url)
+            plat_label = PLATFORM_KIND_LABELS.get(meta.get("platform") or "max", "Чат")
+            if settings.is_demo:
+                thumb = md.svg_thumb("Видео из чата MAX" if kind == MediaKind.video else "Фото из чата MAX",
+                                     bg="#3b4a5a", kind=kind.value)
+            else:  # live: только реальное изображение (превью t.me / вложение MAX), без заглушек
+                thumb = url if kind == MediaKind.photo and url.startswith("http") else None
             chat_cands.append({
                 "key": f"m{len(chat_cands) + 1}", "source_id": sid, "url": url, "kind": kind.value,
-                "thumbnail_url": md.svg_thumb("Видео из чата MAX" if kind == MediaKind.video else "Фото из чата MAX",
-                                              bg="#3b4a5a", kind=kind.value),
-                "origin": f"Чат MAX «{meta.get('chat_title')}», {meta.get('author_name') or 'участник'}",
+                "thumbnail_url": thumb,
+                "origin": (f"Чат MAX «{meta.get('chat_title')}», {meta.get('author_name') or 'участник'}"
+                           if settings.is_demo else
+                           f"{plat_label} «{meta.get('chat_title')}», {meta.get('author_name') or 'участник'}"),
                 "captured_at": s.published_at, "published_at": s.published_at, "context": s.snippet, "note": None,
             })
         else:
@@ -918,6 +976,9 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
     sections["confirmed"]["items"] = items("confirmed", it.get("confirmed", []))
     sections["unconfirmed"]["items"] = items("unconfirmed", it.get("unconfirmed", []))
     sections["contradictions"]["items"] = items("contradictions", it.get("contradictions", []))
+    for key, note in (it.get("notes") or {}).items():  # пояснения экстрактивного режима («требуется LLM»)
+        if key in sections and key != "summary" and not sections[key]["text"]:
+            sections[key]["text"] = note
 
     # 4. Источники — первоисточники (дубли свёрнуты)
     cluster_size: dict[int, int] = {}
@@ -937,7 +998,11 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
     for sid in key_sids[:12]:
         s, u = ctx.sources[sid], ctx.uniq.get(sid)
         dup = cluster_size.get(u.cluster_id, 1) - 1 if u else 0
-        label = KIND_LABELS.get(s.kind.value, "Источник")
+        meta = ctx.src_meta.get(sid, {})
+        label = (PLATFORM_KIND_LABELS.get(meta.get("platform") or "max", "Чат") if s.kind == SourceKind.max_chat
+                 else KIND_LABELS.get(s.kind.value, "Источник"))
+        if meta.get("outlet") and s.kind != SourceKind.max_chat:
+            label = f"{label} ({meta['outlet']})"
         src_rows.append({
             "text": f"{label}: {s.title}" + (f" (+{dup} дубл.)" if dup else ""),
             "source_ids": [sid], "state": "confirmed" if s.kind == SourceKind.official else None,
@@ -977,7 +1042,8 @@ def build_report(ctx: PipelineContext) -> dict[str, Any]:
     verify_rows = list(it.get("to_verify", []))
     contacts = _report_contacts(ctx)
     for c in contacts[:4]:
-        phone_note = "телефон в профиле MAX" if c["has_phone"] else "телефон скрыт — написать в MAX"
+        plat = {"telegram": "Telegram"}.get(c.get("platform") or "max", "MAX")
+        phone_note = f"телефон в профиле {plat}" if c["has_phone"] else f"телефон скрыт — написать в {plat}"
         verify_rows.append({"text": f"Позвонить очевидцу: {c['name'] or 'автор сообщения'} ({c['chat_title']}, {phone_note}) — "
                                     f"«{first_sentence(c['quote'] or '', 90)}»",
                             "source_ids": [c["source_id"]], "state": None})
@@ -1054,6 +1120,13 @@ async def stage_report_and_draft(session: AsyncSession, ctx: PipelineContext) ->
     res = await _llm_json("draft", payload)
     title, body = str(res.get("title") or "").strip(), str(res.get("body") or "").strip()
     claims = validate_claims(body, res.get("claims") or [], set(ctx.sources)) if body else []
+    if (not title or not body or (facts and not claims)) and not settings.is_demo:
+        from app.ai.extractive import compose_extractive_draft
+
+        log.warning("draft from LLM invalid — composing extractive draft")
+        local = compose_extractive_draft(headline, facts)
+        title, body = local["title"], local["body"]
+        claims = validate_claims(body, local["claims"], set(ctx.sources))
     if not title or not body or (facts and not claims):
         log.warning("draft from LLM invalid — composing locally")
         local = compose_draft(headline, [{"text": f["claim"], "source_ids": f["source_ids"], "status": f["status"]}

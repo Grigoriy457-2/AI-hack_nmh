@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>QA Atom</title>
+  <subtitle>Атом-лента</subtitle>
+  <link href="https://atom.example/" rel="alternate"/>
+  <link href="https://atom.example/feed" rel="self"/>
+  <entry>
+    <title>Атом: перекрыта улица Полбина</title>
+    <link href="https://atom.example/a1" rel="alternate"/>
+    <id>urn:qa:a1</id>
+    <updated>2026-11-15T06:00:00Z</updated>
+    <summary>Из-за ремонта трубы</summary>
+  </entry>
+</feed>

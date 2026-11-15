@@ -94,7 +94,7 @@ class AnthropicLLM(LLMClient):
         self.max_tokens = max_tokens
         self.fallback_to_mock = fallback_to_mock
         self._client = None
-        self._mock = MockLLM()
+        self._mock = fallback_llm()  # demo: MockLLM; live: ExtractiveLLM (без синтетики)
         self._disabled_reason: str | None = None  # 401/403 — дальше сразу MockLLM, без сети
 
     def _get_client(self):
@@ -529,14 +529,27 @@ def get_llm() -> LLMClient:
     if _llm is None:
         from app.config import settings
 
-        use_real = settings.LLM_PROVIDER == "anthropic" or (
-            settings.LLM_PROVIDER == "auto" and bool(settings.ANTHROPIC_API_KEY)
-        )
-        if use_real and settings.ANTHROPIC_API_KEY:
+        prov = settings.LLM_PROVIDER
+        if prov in ("anthropic", "auto") and settings.ANTHROPIC_API_KEY:
             _llm = AnthropicLLM(settings.ANTHROPIC_API_KEY, settings.LLM_MODEL, settings.LLM_TIMEOUT)
-        else:
+        elif prov == "mock" or (prov in ("auto", "anthropic") and settings.is_demo):
             _llm = MockLLM()
+        else:  # live без ключа или явно extractive — без выдуманных фактов (TZ_v3 п.5)
+            from app.ai.extractive import ExtractiveLLM
+
+            _llm = ExtractiveLLM()
     return _llm
+
+
+def fallback_llm() -> LLMClient:
+    """Запасной ответ при сбое реального LLM: demo — MockLLM, live — ExtractiveLLM (без синтетики)."""
+    from app.config import settings
+
+    if settings.is_demo or settings.LLM_PROVIDER == "mock":
+        return MockLLM()
+    from app.ai.extractive import ExtractiveLLM
+
+    return ExtractiveLLM()
 
 
 def set_llm(client: LLMClient | None) -> None:

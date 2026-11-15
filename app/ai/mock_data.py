@@ -49,9 +49,13 @@ SCENARIO_EVENT_STEMS: frozenset[str] = frozenset(_stem(w) for w in (
 
 
 def is_scenario(text: str) -> bool:
-    """Зацепка/запрос относится к демо-сценарию «Чертаново, хлопок»."""
+    """Зацепка/запрос относится к демо-сценарию «Чертаново, хлопок». Только DATA_MODE=demo:
+    в live синтетический сценарий не подставляется никогда (TZ_v3 п.5)."""
     from app.ai.text import stems
+    from app.config import settings
 
+    if not settings.is_demo:
+        return False
     s = stems(text)
     return bool(s & SCENARIO_LOCATION_STEMS) and bool(s & SCENARIO_EVENT_STEMS)
 

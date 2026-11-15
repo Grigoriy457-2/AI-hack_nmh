@@ -31,12 +31,17 @@
         <button class="chip" type="button" data-filter="phone" aria-pressed="false">С телефоном</button>
         <button class="chip" type="button" data-filter="max" aria-pressed="false">MAX</button>
         <button class="chip" type="button" data-filter="telegram" aria-pressed="false">Telegram</button>
+        <button class="chip" type="button" data-filter="rss" aria-pressed="false">СМИ</button>
       </div>
     </div>
     <div class="pane__body pane__body--flush" data-feed-scroll>
       <button class="feed-new" type="button" data-feed-new></button>
       <ol class="feed" data-feed aria-live="polite" aria-relevant="additions"></ol>
-      <p class="feed-empty" data-feed-empty hidden>Пока тихо. Сообщения из подключённых чатов появятся здесь сами — или перезапустите демо-поток в разделе <a href="/sources">Источники</a>.</p>
+      <div class="empty" data-feed-empty hidden>
+        <b>Пока тихо</b>
+        {% if live_sources_count %}Подключено источников: {{ live_sources_count }}. Новые сообщения появятся здесь сами, как только каналы и ленты что-то опубликуют.{% else %}Ни один источник не подключён.{% endif %}
+        <div class="btn-row" style="margin-top:12px"><a class="btn btn--primary btn--sm" href="/sources">Добавить источник</a>{% if data_mode and data_mode.is_demo %}<span class="muted" style="font-size:13px">или перезапустите демо-поток там же</span>{% endif %}</div>
+      </div>
     </div>
   </section>
 

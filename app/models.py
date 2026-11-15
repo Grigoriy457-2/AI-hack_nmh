@@ -71,13 +71,14 @@ HANDOFF_CHANNELS: dict[str, str] = {
 class Platform(str, enum.Enum):
     max = "max"
     telegram = "telegram"
+    rss = "rss"  # v3: RSS-лента СМИ / официального сайта
 
     @property
     def label(self) -> str:
         return PLATFORM_LABELS[self.value]
 
 
-PLATFORM_LABELS = {"max": "MAX", "telegram": "Telegram"}
+PLATFORM_LABELS = {"max": "MAX", "telegram": "Telegram", "rss": "СМИ (RSS)"}
 
 
 class StoryOrigin(str, enum.Enum):
@@ -142,18 +143,28 @@ class Channel(Base):
 
 
 class MaxChat(Base):
-    """Чат-источник (MAX или Telegram). Алиас ``SourceChat``."""
+    """Источник: чат/канал MAX или Telegram, RSS-лента СМИ (platform='rss'). Алиас ``SourceChat``.
+
+    v3: удаление «мягкое» (``deleted_at``) — строка остаётся, чтобы сообщения, на которые ссылаются
+    сюжеты, не потерялись, а поллер не пересоздал источник из ``list_chats()`` клиента.
+    """
 
     __tablename__ = "source_chats"
     __table_args__ = (UniqueConstraint("platform", "external_id", name="uq_source_chat_ext"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    platform: Mapped[str] = mapped_column(String(16), default="max", index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="max", index=True)  # max | telegram | rss
+    # telegram: tg:<username>; max: id чата / slug max.ru; rss: rss:<url ленты> (см. CONTRACTS_v3 §2)
     external_id: Mapped[str] = mapped_column(String(128))
     ref: Mapped[str | None] = mapped_column(String(255))  # ссылка / @username, как ввёл редактор
     username: Mapped[str | None] = mapped_column(String(128))  # Telegram: @username без @
-    kind: Mapped[str | None] = mapped_column(String(16))  # channel | group | chat
-    url: Mapped[str | None] = mapped_column(String(512))  # https://t.me/<username>
+    kind: Mapped[str | None] = mapped_column(String(16))  # channel | group | chat | user | feed
+    url: Mapped[str | None] = mapped_column(String(512))  # https://t.me/<username>; rss — URL ленты
+    site_url: Mapped[str | None] = mapped_column(String(512))  # rss: сайт СМИ
+    avatar_url: Mapped[str | None] = mapped_column(String(1024))
+    subscribers: Mapped[int | None] = mapped_column(Integer)
+    description: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)  # мягкое удаление
     title: Mapped[str] = mapped_column(String(255))
     district: Mapped[str | None] = mapped_column(String(128))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -375,10 +386,41 @@ class DismissedEmerging(Base):
 SourceChat = MaxChat
 
 
+def add_missing_columns(sync_conn) -> list[str]:
+    """Лёгкая «миграция»: ``create_all`` не добавляет колонки в существующие таблицы — добавляем
+    недостающие (``ALTER TABLE … ADD COLUMN``). Вызывается из lifespan после ``init_db``
+    (``await conn.run_sync(add_missing_columns)``). Возвращает список «table.column»."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(sync_conn)
+    tables = set(insp.get_table_names())
+    dialect = sync_conn.dialect
+    q = dialect.identifier_preparer.quote
+    added: list[str] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in tables:
+            continue
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have or col.primary_key:
+                continue
+            ddl = f"ALTER TABLE {q(table.name)} ADD COLUMN {q(col.name)} {col.type.compile(dialect=dialect)}"
+            default = getattr(col.default, "arg", None) if col.default is not None else None
+            if isinstance(default, bool):
+                ddl += f" NOT NULL DEFAULT {int(default)}"
+            elif isinstance(default, (int, float)):
+                ddl += f" NOT NULL DEFAULT {default}"
+            elif isinstance(default, str):
+                ddl += " NOT NULL DEFAULT '" + default.replace("'", "''") + "'"
+            sync_conn.execute(text(ddl))
+            added.append(f"{table.name}.{col.name}")
+    return added
+
+
 __all__ = [
     "InvestigationStatus", "SourceKind", "MediaKind", "DraftAuthorKind", "FactState", "Platform",
     "StoryOrigin", "STATUS_LABELS", "STATUS_ORDER", "ACTIVE_STATUSES", "HANDOFF_CHANNELS",
-    "PLATFORM_LABELS", "utcnow",
+    "PLATFORM_LABELS", "utcnow", "add_missing_columns",
     "User", "Channel", "MaxChat", "SourceChat", "ChatMessage", "AuthorProfile", "Investigation",
     "SearchIteration", "Source", "MediaItem", "Report", "Draft", "FactMark", "StatusHistory",
     "DismissedEmerging",

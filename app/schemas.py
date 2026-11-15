@@ -59,6 +59,14 @@ class SourceChatOut(ORM):
     enabled: bool
     last_synced_at: datetime | None = None
     messages_count: int = 0
+    # v3 (CONTRACTS_v3 §2): реальные метаданные источника из resolve
+    username: str | None = None
+    kind: str | None = None  # channel | group | chat | user | feed
+    url: str | None = None  # t.me/max.ru-ссылка; для rss — URL ленты
+    site_url: str | None = None
+    avatar_url: str | None = None
+    subscribers: int | None = None
+    description: str | None = None
 
 
 MaxChatOut = SourceChatOut  # совместимость v1
@@ -76,10 +84,59 @@ MaxChatUpdate = SourceChatUpdate
 
 
 class SourceAddIn(BaseModel):
-    platform: Literal["max", "telegram"] = "telegram"
-    ref: str = Field(default="", max_length=255, description="@username, t.me-ссылка или id чата (пустое — 422 с понятным detail)")
+    """``platform="auto"`` — определить по ссылке (как ``/api/sources/resolve``)."""
+
+    platform: Literal["max", "telegram", "rss", "auto"] = "telegram"
+    ref: str = Field(default="", max_length=1024,
+                     description="@username, t.me/max.ru-ссылка, id чата MAX или URL сайта/RSS (пустое — 422)")
     title: str | None = Field(default=None, max_length=255)
     district: str | None = Field(default=None, max_length=128)
+
+
+class SourceResolveIn(BaseModel):
+    ref: str = Field(default="", max_length=1024)
+    platform: Literal["max", "telegram", "rss", "auto"] | None = None  # подсказка; None/auto — по ссылке
+
+
+class SourcePreviewOut(BaseModel):
+    """Превью источника до добавления (POST /api/sources/resolve). Ошибка — в ``error``, не 4xx."""
+
+    platform: Literal["max", "telegram", "rss"]
+    platform_label: str = ""
+    ref: str
+    external_id: str | None = None  # с каким external_id источник будет сохранён
+    title: str
+    username: str | None = None
+    kind: str | None = None
+    avatar_url: str | None = None
+    subscribers: int | None = None
+    description: str | None = None
+    url: str | None = None
+    site_url: str | None = None
+    already_added: bool = False
+    chat_id: int | None = None  # id уже подключённого источника
+    error: str | None = None
+    cached: bool = False
+
+
+class SourceDeleteOut(BaseModel):
+    id: int
+    title: str
+    platform: str
+    deleted: bool = True
+    archived_messages: int = 0  # сколько сообщений ушло из ленты/emerging/поиска
+    story_references: int = 0  # сколько строк источников в сюжетах ссылаются на его сообщения (остаются)
+
+
+class ModeOut(BaseModel):
+    data_mode: str  # live | demo
+    llm: str  # anthropic | extractive | mock
+    telegram_provider: str | None = None
+    max_provider: str | None = None
+    search_providers: list[str] = Field(default_factory=list)
+    label: str | None = None  # «Реальные данные» | «Демо (синтетика)»
+    rss_ingest: bool | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class SyncResult(BaseModel):

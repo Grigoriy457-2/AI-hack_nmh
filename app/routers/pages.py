@@ -43,8 +43,10 @@ ACTIVE_STATUSES: set = set(getattr(M, "ACTIVE_STATUSES", {s for s in S if s.valu
 HANDOFF_CHANNELS: dict[str, str] = dict(getattr(M, "HANDOFF_CHANNELS", {
     "site": "Сайт", "telegram": "Telegram-канал", "max": "Канал MAX", "tv": "ТВ/радио",
     "print": "Печать/газета", "social": "Соцсети", "other": "Другое"}))
-PLATFORM_LABELS: dict[str, str] = dict(getattr(M, "PLATFORM_LABELS", {"max": "MAX", "telegram": "Telegram"}))
-PLATFORM_SHORT = {"max": "MAX", "telegram": "TG"}
+PLATFORM_LABELS: dict[str, str] = {"max": "MAX", "telegram": "Telegram", "rss": "СМИ (RSS)",
+                                   **dict(getattr(M, "PLATFORM_LABELS", {}))}
+PLATFORM_SHORT = {"max": "MAX", "telegram": "TG", "rss": "СМИ"}
+KIND_LABELS = {"channel": "канал", "group": "группа", "chat": "чат", "user": "пользователь", "feed": "лента"}
 SourceChat = getattr(M, "SourceChat", None) or M.MaxChat
 
 SOURCE_KIND_LABELS = {"web": "Сайт / СМИ", "max_chat": "Чат", "official": "Официальный", "media": "Медиа"}
@@ -139,7 +141,7 @@ def status_label(s: Any) -> str:
 
 
 def initials(name: str | None) -> str:
-    parts = [p for p in (name or "?").split() if p]
+    parts = [p for p in re.split(r"[^\w]+", name or "") if p]
     return "".join(p[0] for p in parts[:2]).upper() or "?"
 
 
@@ -189,7 +191,7 @@ env = templates.env
 env.filters.update(dt=fmt_dt, ago=fmt_ago, dur=fmt_dur, pct=fmt_pct, ev=ev, status_label=status_label,
                    initials=initials, safe_url=safe_url, host=host_of, tel=tel_href, jsonable=to_json_data)
 env.globals.update(STATUS_LABELS=STATUS_LABELS, STATUS_ORDER=STATUS_ORDER, HANDOFF_CHANNELS=HANDOFF_CHANNELS,
-                   PLATFORM_LABELS=PLATFORM_LABELS, PLATFORM_SHORT=PLATFORM_SHORT,
+                   PLATFORM_LABELS=PLATFORM_LABELS, PLATFORM_SHORT=PLATFORM_SHORT, KIND_LABELS=KIND_LABELS,
                    SOURCE_KIND_LABELS=SOURCE_KIND_LABELS, AGENT_LABELS=AGENT_LABELS,
                    FACT_STATE_LABELS=FACT_STATE_LABELS, plural=plural, asset=asset, APP_NAME=settings.APP_NAME)
 
@@ -221,10 +223,38 @@ async def _live_sources_count(session: AsyncSession) -> int:
         return 0
 
 
+_MODE_CACHE: dict[str, Any] = {"at": None, "data": None}
+
+
+async def _data_mode() -> dict[str, Any] | None:
+    """Режим данных для шапки (= GET /api/mode), кэш 30 с. Ошибки не роняют страницу."""
+    now = M.utcnow()
+    at = _MODE_CACHE["at"]
+    if at is not None and (now - at).total_seconds() < 30:
+        return _MODE_CACHE["data"]
+    data = None
+    try:
+        from app.routers.api import get_mode
+
+        data = jsonable_encoder(await get_mode())
+    except Exception:  # noqa: BLE001
+        log.debug("data mode unavailable", exc_info=True)
+    if data is not None:
+        is_demo = data.get("data_mode") == "demo"
+        llm = data.get("llm")
+        data["ui_label"] = "Демо-данные" if is_demo else "Реальные данные"
+        data["ui_ai"] = "AI-анализ" if llm == "anthropic" else ("Без AI: только цитаты" if llm == "extractive"
+                                                               else "AI-заглушка (демо)" if llm == "mock" else None)
+        data["is_demo"] = is_demo
+    _MODE_CACHE.update(at=now, data=data)
+    return data
+
+
 async def _render(request: Request, name: str, ctx: dict[str, Any], *, user: Any, session: AsyncSession,
                   nav_active: str = "", status_code: int = 200) -> HTMLResponse:
     base = {"request": request, "user": user, "nav_active": nav_active, "flash": _flash(request),
-            "live_sources_count": await _live_sources_count(session) if user else 0}
+            "live_sources_count": await _live_sources_count(session) if user else 0,
+            "data_mode": await _data_mode()}
     base.update(ctx)
     return templates.TemplateResponse(request, name, base, status_code=status_code)
 
@@ -514,7 +544,7 @@ async def sources_page(request: Request, user: Any = Depends(current_user),
 
 
 @router.post("/sources/add")
-async def sources_add_form(platform: str = Form("telegram"), ref: str = Form(""),
+async def sources_add_form(platform: str = Form("auto"), ref: str = Form(""),
                            district: str | None = Form(None), user: Any = Depends(current_user),
                            session: AsyncSession = Depends(get_session)):
     from app.services import sources as sources_svc

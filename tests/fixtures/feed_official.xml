@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>mos.ru — новости Москвы</title>
+  <link>https://www.mos.ru</link>
+  <item>
+    <title>Пожар автобуса на Варшавском шоссе в Москве потушен, пострадавших нет</title>
+    <link>https://www.mos.ru/news/item/qa-bus-fire/</link>
+    <description>Возгорание автобуса на Варшавском шоссе в Москве ликвидировано, пострадавших нет.</description>
+    <pubDate>__PUB1__</pubDate>
+  </item>
+</channel>
+</rss>

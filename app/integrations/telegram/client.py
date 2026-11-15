@@ -256,8 +256,9 @@ def _telethon_available() -> bool:
 
 def choose_provider(provider: str | None = None) -> str:
     """Разрешить TG_PROVIDER=auto: telethon (ключи + сессия + пакет) → bot (токен) →
-    web (заданы TG_SOURCES) → mock."""
-    from app.integrations.telegram.settings import get_tg_settings
+    DATA_MODE=live: web (t.me/s, стартовый набор каналов или TG_SOURCES) | demo: web, если заданы
+    TG_SOURCES, иначе mock."""
+    from app.integrations.telegram.settings import _is_live, get_tg_settings
 
     s = get_tg_settings()
     provider = provider or s.TG_PROVIDER
@@ -267,7 +268,9 @@ def choose_provider(provider: str | None = None) -> str:
         return "telethon"
     if s.TG_BOT_TOKEN:
         return "bot"
-    if s.sources:
+    if _is_live():
+        return "web"
+    if s.TG_SOURCES.strip():
         return "web"
     return "mock"
 

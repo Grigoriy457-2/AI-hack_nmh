@@ -95,8 +95,17 @@
   };
   var PF = {
     max: { label: 'MAX', short: 'MAX', svg: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.5L8 2.5l5 4V12H7l-3 2v-2H3z"/></svg>' },
-    telegram: { label: 'Telegram', short: 'TG', svg: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="7.5" r="5.5"/><path d="M4.2 11.6L3 14l3-1.2"/></svg>' }
+    telegram: { label: 'Telegram', short: 'TG', svg: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="7.5" r="5.5"/><path d="M4.2 11.6L3 14l3-1.2"/></svg>' },
+    rss: { label: 'СМИ (RSS)', short: 'СМИ', svg: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1"/><path d="M5 6h6M5 8.5h6M5 11h3.5"/></svg>' }
   };
+  var KIND_LABELS = { channel: 'канал', group: 'группа', chat: 'чат', user: 'пользователь', feed: 'лента новостей' };
+  function hostOf(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } }
+  function httpUrl(u) { return u && /^https?:\/\//i.test(u) ? u : null; }
+  function extLink(u, text, cls) {
+    var h = httpUrl(u);
+    if (!h) return '';
+    return '<a class="' + (cls || 'ext') + '" href="' + esc(h) + '" target="_blank" rel="noopener noreferrer">' + esc(text || hostOf(h)) + '</a>';
+  }
   function pfHTML(p, short) {
     var x = PF[p] || PF.max;
     return '<span class="pf pf--' + esc(p || 'max') + '" title="' + x.label + '">' + x.svg + (short ? x.short : x.label) + '</span>';
@@ -122,6 +131,22 @@
       store('nf-theme', next);
       paint();
     });
+  }
+
+  function initModePop() {
+    var box = $('[data-mode-pop]');
+    if (!box) return;
+    var btn = $('.mode__btn', box);
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var open = !box.classList.contains('is-open');
+      box.classList.toggle('is-open', open);
+      btn.setAttribute('aria-expanded', String(open));
+    });
+    document.addEventListener('click', function (e) {
+      if (!box.contains(e.target)) { box.classList.remove('is-open'); btn.setAttribute('aria-expanded', 'false'); }
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { box.classList.remove('is-open'); btn.blur(); } });
   }
 
   function initHints() {
@@ -203,7 +228,7 @@
         case 'unique': return li.dataset.unique === '1';
         case 'important': return li.dataset.important === '1';
         case 'phone': return li.dataset.phone === '1';
-        case 'max': case 'telegram': return li.dataset.platform === filter;
+        case 'max': case 'telegram': case 'rss': return li.dataset.platform === filter;
         default: return true;
       }
     }
@@ -233,12 +258,15 @@
       if (b.has_phone) badges += '<span class="badge badge--phone">' + ICON.phone + 'есть телефон</span>';
       if (m.has_media) badges += '<span class="msg__media">' + ICON.image + 'фото</span>';
       if (m.is_forwarded) badges += '<span class="msg__media">' + ICON.fwd + 'переслано</span>';
+      var link = extLink(m.message_url, hostOf(m.message_url) === 't.me' ? 'открыть в Telegram' : hostOf(m.message_url));
+      if (link) badges += link;
+      var showAuthor = m.author_name && m.author_name !== m.chat_title;
       li.innerHTML =
         '<time class="msg__time" datetime="' + esc(m.sent_at) + '">' + hhmm(m.sent_at) + '</time>' +
         '<div>' +
           '<div class="msg__head">' + pfHTML(m.platform, true) +
             '<span class="plate" title="' + esc(m.chat_title) + (m.district ? ', ' + esc(m.district) : '') + '">' + esc(m.chat_title || 'Чат') + '</span>' +
-            '<span class="msg__author">' + esc(m.author_name || 'Аноним') + '</span>' +
+            (showAuthor ? '<span class="msg__author">' + esc(m.author_name) + '</span>' : '') +
           '</div>' +
           '<p class="msg__text">' + esc(m.text) + '</p>' +
           (badges ? '<div class="msg__badges">' + badges + '</div>' : '') +
@@ -296,6 +324,10 @@
       if (scroller.scrollTop < 40 && unseenAbove) { unseenAbove = 0; newBtn.classList.remove('is-on'); }
     }, { passive: true });
 
+    list.addEventListener('click', function (e) {
+      var t = e.target.closest('.msg__text');
+      if (t && !window.getSelection().toString()) t.classList.toggle('is-open');
+    });
     $$('[data-filter]').forEach(function (b) {
       b.addEventListener('click', function () {
         filter = b.getAttribute('data-filter');
@@ -743,7 +775,8 @@
             var html = '<ol class="chain" data-chain>' + its.map(function (it) {
               return '<li><div class="chain__why">' + esc(it.rationale || 'Первые запросы по зацепке') + '</div><ul class="chain__q">' +
                 (it.queries_json || []).map(function (q) {
-                  return '<li><span><span class="agent">' + esc(q.agent) + '</span> ' + esc(q.query) + '</span><span class="n">' + (q.results || 0) + (q['new'] != null ? ' / ' + q['new'] : '') + '</span></li>';
+                  var AG = { web: 'веб', max_chats: 'чаты', max_chat: 'чаты', official: 'официальные', media: 'медиа', telegram: 'Telegram' };
+                  return '<li><span><span class="agent">' + esc(AG[q.agent] || q.agent) + '</span> ' + esc(q.query) + '</span><span class="n">' + (q.results || 0) + (q['new'] != null ? ' / ' + q['new'] : '') + '</span></li>';
                 }).join('') + '</ul></li>';
             }).join('') + '</ol>';
             if (chain) chain.outerHTML = html;
@@ -767,16 +800,96 @@
   // ================================================================ ИСТОЧНИКИ
   function initSources() {
     var form = $('[data-add-source]');
-    if (form) form.addEventListener('submit', function (ev) {
+    if (form) {
+      var input = form.ref, box = $('[data-preview]', form), addBtn = $('[data-add-btn]', form);
+      var preview = null, seq = 0, timer = null, lastRef = '';
+      var fmtNum = function (n) {
+        if (n >= 1e6) return (n / 1e6).toFixed(1).replace('.', ',').replace(',0', '') + ' млн';
+        if (n >= 1e4) return Math.round(n / 1e3) + ' тыс.';
+        return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+      };
+      var setState = function (cls, html) {
+        box.hidden = !cls;
+        box.className = 'preview' + (cls && cls !== 'ok' ? ' is-' + cls : '');
+        box.innerHTML = html || '';
+      };
+      var renderPreview = function (p) {
+        var pf = PF[p.platform] ? p.platform : 'max';
+        var ava = httpUrl(p.avatar_url)
+          ? '<img class="ava" src="' + esc(p.avatar_url) + '" alt="" referrerpolicy="no-referrer">'
+          : '<span class="ava ava--ph">' + esc((p.title || '?').trim().slice(0, 1).toUpperCase()) + '</span>';
+        var link = p.url || p.site_url;
+        var meta = pfHTML(pf, false) +
+          (p.kind ? '<span>' + esc(KIND_LABELS[p.kind] || p.kind) + '</span>' : '') +
+          (p.subscribers ? '<span class="t">' + fmtNum(p.subscribers) + ' ' + (p.subscribers >= 1e4 ? 'подписчиков' : plural(p.subscribers, 'подписчик', 'подписчика', 'подписчиков')) + '</span>' : '') +
+          (p.username ? '<span>@' + esc(p.username) + '</span>' : '') +
+          extLink(link, hostOf(link));
+        setState('ok', ava + '<div><div class="preview__title">' + esc(p.title) + '</div><div class="preview__meta">' + meta + '</div>' +
+          (p.description ? '<p class="preview__desc">' + esc(p.description) + '</p>' : '') +
+          (p.already_added ? '<div class="preview__note">Этот источник уже подключён — он есть в списке ниже.</div>' : '') + '</div>');
+      };
+      var resolve = function (force) {
+        var ref = input.value.trim();
+        if (!ref) { preview = null; addBtn.disabled = true; setState(null); lastRef = ''; return; }
+        if (ref === lastRef && !force) return;
+        lastRef = ref;
+        var my = ++seq;
+        preview = null; addBtn.disabled = true;
+        setState('loading', 'Ищем источник…');
+        api('POST', '/api/sources/resolve', { ref: ref }).then(function (p) {
+          if (my !== seq) return;
+          if (!p || p.error) {
+            var why = String((p && p.error) || 'Источник не найден').replace(/\b[A-Z]\w*(Error|Exception):\s*/g, '');
+            setState('error', '<b>Не получилось подключить.</b> ' + esc(why) +
+              '<div class="muted" style="margin-top:4px">Проверьте ссылку: нужен публичный канал, группа или сайт с RSS-лентой.</div>');
+            return;
+          }
+          preview = p;
+          renderPreview(p);
+          addBtn.disabled = !!p.already_added;
+          form.platform.value = p.platform || 'auto';
+        }).catch(function (e) {
+          if (my !== seq) return;
+          lastRef = '';
+          setState('error', '<b>Не получилось проверить ссылку.</b> ' + esc(e.message));
+        });
+      };
+      input.addEventListener('paste', function () { setTimeout(function () { resolve(true); }, 0); });
+      input.addEventListener('input', function () { clearTimeout(timer); addBtn.disabled = true; timer = setTimeout(resolve, 700); });
+      input.addEventListener('blur', function () { clearTimeout(timer); resolve(); });
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        if (!preview || preview.error || input.value.trim() !== lastRef) { clearTimeout(timer); resolve(true); return; }
+        if (preview.already_added) { toast('Этот источник уже подключён'); return; }
+        busy(addBtn, true);
+        var body = { platform: preview.platform || 'auto', ref: input.value.trim() };
+        if (form.district.value.trim()) body.district = form.district.value.trim();
+        api('POST', '/api/sources', body)
+          .then(function (c) { reloadWith('Источник «' + ((c && c.title) || preview.title) + '» подключён'); })
+          .catch(function (e) { busy(addBtn, false); addBtn.disabled = false; toast(e.message, true); });
+      });
+    }
+
+    // удаление источника
+    var ddlg = document.getElementById('dlg-del-src'), dform = $('[data-del-form]'), delId = null;
+    $$('[data-del-src]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        delId = b.getAttribute('data-del-src');
+        $('[data-del-title]', ddlg).textContent = b.getAttribute('data-title');
+        if (ddlg.showModal) ddlg.showModal(); else ddlg.setAttribute('open', '');
+      });
+    });
+    if (dform) dform.addEventListener('submit', function (ev) {
       ev.preventDefault();
-      var ref = form.ref.value.trim();
-      if (!ref) { toast('Укажите @username или ссылку t.me', true); return; }
-      var btn = $('[type=submit]', form); busy(btn, true);
-      var body = { platform: form.platform.value, ref: ref };
-      if (form.district.value.trim()) body.district = form.district.value.trim();
-      api('POST', '/api/sources', body)
-        .then(function (c) { reloadWith('Источник «' + (c && c.title || ref) + '» подключён'); })
-        .catch(function (e) { busy(btn, false); toast(e.message, true); });
+      var btn = $('[type=submit]', dform); busy(btn, true);
+      api('DELETE', '/api/sources/chats/' + delId).then(function (r) {
+        busy(btn, false); ddlg.close();
+        var row = $('[data-src-row="' + delId + '"]');
+        if (row) { row.classList.add('is-removing'); setTimeout(function () { row.remove(); var left = $$('[data-src-row]').length; var c = $('[data-src-count]'); if (c) c.textContent = left; if (!left) { var t = $('[data-src-table]'); if (t) t.remove(); $('[data-src-empty]').hidden = false; } }, 300); }
+        var n = (r && r.archived_messages) || 0, m = (r && r.story_references) || 0;
+        toast('Источник «' + ((r && r.title) || '') + '» удалён: ' + n + ' ' + plural(n, 'сообщение ушло', 'сообщения ушли', 'сообщений ушли') + ' из ленты' +
+          (m ? ', ссылок в сюжетах сохранено: ' + m : ''));
+      }).catch(function (e) { busy(btn, false); toast(e.message, true); });
     });
     $$('[data-toggle-chat]').forEach(function (cb) {
       cb.addEventListener('change', function () {
@@ -791,6 +904,7 @@
   // ================================================================ старт
   document.addEventListener('DOMContentLoaded', function () {
     initTheme();
+    initModePop();
     initHints();
     initSwitcher();
     initDialogs();

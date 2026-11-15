@@ -120,24 +120,70 @@ async def test_add_max_source(editor, users):
     assert again["id"] == r["id"]
 
 
-async def test_delete_source_without_references(editor, with_telegram):
-    tg = next(c for c in with_telegram if c["external_id"] == "tg:srochno_yug_demo")
-    check(await editor.delete(f"/api/sources/chats/{tg['id']}"), 204)
+DELETE_KEYS = {"id", "title", "platform", "deleted", "archived_messages", "story_references"}
+
+
+async def _feed_ids(editor) -> set[int]:
+    return {m["chat_id"] for m in data(await editor.get("/api/feed", params={"limit": 500}))["items"]}
+
+
+async def test_delete_source_soft(editor, with_telegram):
+    """CONTRACTS_v3 §4: 200 + SourceDeleteOut; источник скрыт, сообщения archived (уходят из ленты/
+    emerging), повторное удаление — 404, повторное добавление восстанавливает ту же строку (201)."""
+    tg = next(c for c in with_telegram if c["external_id"] == "tg:moscow_live_demo")
+    assert tg["id"] in await _feed_ids(editor)
+    cards_before = data(await editor.get("/api/emerging"))
+    assert any(tg["title"] in c["chats"] for c in cards_before)
+    r = data(await editor.delete(f"/api/sources/chats/{tg['id']}"))
+    assert set(r) == DELETE_KEYS
+    assert r == {"id": tg["id"], "title": tg["title"], "platform": "telegram", "deleted": True,
+                 "archived_messages": tg["messages_count"], "story_references": 0}
     assert tg["id"] not in {c["id"] for c in data(await editor.get("/api/sources/chats"))}
-    feed = data(await editor.get("/api/feed", params={"limit": 500}))["items"]
-    assert tg["id"] not in {m["chat_id"] for m in feed}
+    assert tg["id"] not in await _feed_ids(editor)
+    for c in data(await editor.get("/api/emerging")):
+        assert tg["title"] not in c["chats"], "сообщения удалённого источника не в «Возникающих сюжетах»"
+    res = data(await editor.post("/api/sources/sync"))
+    assert res["new_messages"] == 0, "поллер не пересоздаёт удалённый источник и его сообщения"
+    assert tg["id"] not in {c["id"] for c in data(await editor.get("/api/sources/chats"))}
     check(await editor.delete(f"/api/sources/chats/{tg['id']}"), 404)
+    check(await editor.patch(f"/api/sources/chats/{tg['id']}", json={"enabled": True}), 404)
+    # повторное добавление — та же строка, 201
+    again = data(await editor.post("/api/sources", json={"platform": "telegram", "ref": "@moscow_live_demo"}), 201)
+    assert again["id"] == tg["id"] and again["enabled"] is True
+
+
+@pytest.mark.parametrize("path", ["/api/sources/chats/{id}", "/api/sources/{id}", "/api/max/chats/{id}"])
+async def test_delete_source_aliases(editor, path):
+    chat = data(await editor.get("/api/sources/chats"))[0]
+    r = data(await editor.delete(path.format(id=chat["id"])))
+    assert r["id"] == chat["id"] and r["deleted"] is True and r["archived_messages"] == chat["messages_count"]
+    check(await editor.delete(path.format(id=chat["id"])), 404)
+    check(await editor.delete(path.format(id=999999)), 404)
 
 
 async def test_delete_source_with_story_references(editor, review_story):
-    """Источник, на сообщения которого ссылается сюжет, отключается, а не удаляется; сюжет цел."""
+    """Сообщения источника уходят из ленты, но Source-строки сюжета, цитаты и «Кому позвонить» целы."""
     cid = review_story["chat_id"]
-    check(await editor.delete(f"/api/sources/chats/{cid}"), 204)
-    chats = {c["id"]: c for c in data(await editor.get("/api/sources/chats"))}
-    assert cid in chats and chats[cid]["enabled"] is False
+    r = data(await editor.delete(f"/api/sources/chats/{cid}"))
+    assert r["story_references"] == 5 and r["deleted"] is True
+    assert cid not in {c["id"] for c in data(await editor.get("/api/sources/chats"))}
     src = data(await editor.get(f"/api/stories/{review_story['id']}/sources"))
     assert len(src) == 6 and all(s["snippet"] for s in src)
+    assert all(s["chat_message_id"] for s in src if s["kind"] == "max_chat")
     assert len(data(await editor.get(f"/api/stories/{review_story['id']}/contacts"))) == 2
+
+
+async def test_delete_seed_chat_hides_story_free_messages(editor):
+    chat = max(data(await editor.get("/api/sources/chats")), key=lambda c: c["messages_count"])
+    before = len(data(await editor.get("/api/feed", params={"limit": 500}))["items"])
+    r = data(await editor.delete(f"/api/sources/chats/{chat['id']}"))
+    after = data(await editor.get("/api/feed", params={"limit": 500}))["items"]
+    assert len(after) == before - r["archived_messages"] and chat["id"] not in {m["chat_id"] for m in after}
+    # стори, созданная после удаления, не находит его сообщения
+    inv = data(await editor.post("/api/stories", json={"lead_text": "В Чертанове около 14:30 хлопок у жилого дома"}), 201)
+    src = data(await editor.get(f"/api/stories/{inv['id']}/sources", params={"kind": "max_chat"}))
+    titles = {s["title"] for s in src}
+    assert not any(t.startswith(chat["title"]) for t in titles), "поиск пайплайна не видит удалённый источник"
 
 
 # ================================================================ блок «Telegram»
@@ -151,7 +197,8 @@ async def test_telegram_sources_alias_add_delete(editor):
     r = data(await editor.post("/api/telegram/sources", json={"ref": "https://t.me/chertanovo_online_demo"}), 201)
     assert r["platform"] == "telegram" and r["external_id"] == "tg:chertanovo_online_demo"
     assert data(await editor.post("/api/telegram/sources", json={"ref": "@chertanovo_online_demo"}), 200)["id"] == r["id"]
-    check(await editor.delete("/api/telegram/sources/chertanovo_online_demo"), 204)
+    d = data(await editor.delete("/api/telegram/sources/chertanovo_online_demo"))
+    assert d["deleted"] is True and d["platform"] == "telegram" and d["id"] == r["id"]
     ids = {c["external_id"] for c in data(await editor.get("/api/sources/chats", params={"platform": "telegram"}))}
     assert "tg:chertanovo_online_demo" not in ids
     check(await editor.delete("/api/telegram/sources/tg:chertanovo_online_demo"), 404)

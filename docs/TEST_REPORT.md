@@ -1,4 +1,92 @@
-# NEWSFLOW AI v2 — отчёт QA
+# NEWSFLOW AI — отчёт QA
+
+## v3 «реальные данные» — прогон 2026-11-15
+
+Контракт: `docs/TZ_v3.md`, `docs/CONTRACTS_v3.md` (§7 — запросы к QA), `docs/MAX.md`.
+
+**Основной набор (`pytest`, без `live`): 434 собрано, 430 прошли, 0 упало, 4 исключены (маркер `live`), skip/xfail нет. ~2 мин 17 с.**
+
+**Сетевые тесты (`pytest -m live`, вручную один раз 2026-11-15): 4/4 прошли за 8.6 с.**
+- `resolve https://t.me/telegram`: канал, >1 млн подписчиков, аватар.
+- Лента каталога `https://www.m24.ru/rss.xml`: записи с датами.
+- Google News RSS «Москва»: записи с изданием.
+- Все URL выдачи `RssSearchProvider().search("Москва")` отвечают HTTP < 400.
+
+### Изменения набора под v3
+
+- **conftest**:
+  - `DATA_MODE=demo` для детерминированного набора. Без него было 38 падений.
+  - **Сеть в тестах заблокирована**: autouse-фикстура `fake_net` подменяет транспорт `httpx.AsyncClient` на `MockTransport`. Немаршрутизированный URL → `ConnectError`. Маркер `live` — исключение.
+  - Сброс кэшей v3 между тестами: resolve, ленты, Google News, og:image.
+- **pytest.ini**:
+  - `addopts = -ra -m "not live"`;
+  - маркеры `live` и `realdata`.
+- **Удаление источника** (`test_api_sources.py`) — под новый контракт:
+  - 200 и `SourceDeleteOut` (точное тело);
+  - источник скрыт из списка, сообщения archived — уходят из ленты и emerging;
+  - синк не пересоздаёт источник;
+  - PATCH и повторный DELETE → 404;
+  - повторное добавление → та же строка, 201;
+  - алиасы `/api/sources/{id}`, `/api/max/chats/{id}`, `/api/telegram/sources/{ext}`;
+  - Source-строки сюжета, цитаты и «Кому позвонить» целы, `story_references=5`;
+  - пайплайн не находит сообщения удалённого источника.
+- **`tests/test_realdata_v3.py`** (46 тестов, без сети; фикстуры в `tests/fixtures/`: страницы t.me/t.me/s/max.ru, сайт с `<link rel=alternate>`, RSS, Atom, Google News; маршруты — `tests/realdata_helpers.py`):
+  - `detect_platform` — 12 форм ссылок.
+  - `resolve_telegram`:
+    - канал: title, kind, subscribers, аватар, превью t.me/s, кэш;
+    - группа: дефолтный логотип не считается аватаром;
+    - ошибки: не найден / 404 / приватный инвайт / нет сети.
+  - `resolve_max`: linkInfo, JSON-LD/og, 404, числовой id → «только Bot API».
+  - Парсеры RSS 2.0 / Atom (оба: `rss.parse_feed` и `sources.parse_feed`), `looks_like_feed`.
+  - Google News:
+    - URL запроса, отрезание « - Издание», ошибка 503 → `[]`;
+    - раскрытие старого base64-id без сети;
+    - `RssSearchProvider`: дедуп, раскрытие по заголовку, нераскрытые ссылки остаются Google News, official-фильтр `domains`, ни одной ссылки вне ответов «сети».
+  - `GET /api/mode` (без входа): demo → mock; live → extractive, rss, `rss_ingest`.
+  - `POST /api/sources/resolve`:
+    - t.me, max.ru, сайт → найдена RSS-лента, прямой URL ленты;
+    - `cached`, `already_added`/`chat_id`, resolve ничего не сохраняет;
+    - ошибки → 200 с `error` (нет ленты, сеть, приватная ссылка, не найден, 404);
+    - пустой ref / неизвестная платформа → 422.
+  - `POST /api/sources`:
+    - `platform=rss|auto` (сайт и прямая лента): название из ленты, `kind=feed`, первая выгрузка только записей моложе 24 ч, `message_url` = статья;
+    - повтор → 200;
+    - без ленты / недоступный сайт → 422 с `detail`;
+    - `auto` → Telegram / MAX (реальные title/subscribers/avatar из max.ru).
+  - `sync_rss`: инкрементально (+1 новая запись), удалённый источник не выгружается, HTTP 500 ленты → в `errors`.
+  - **Пайплайн в live** (ExtractiveLLM + RssSearchProvider на фикстурах, чаты демо выключены):
+    - все `Source.url` — только из ответов «сети», нет `max://`/`.mock`;
+    - материал про Новосибирск и нерелевантная «школа» отсечены;
+    - каждый пункт timeline/facts/confirmed/unconfirmed/contradictions имеет `source_ids`;
+    - «Подтверждено» — только `kind=official` (mos.ru);
+    - пустые противоречия — с пояснением;
+    - нет «Чертаново» в справке и черновике;
+    - claims черновика со `source_ids` и подстроки текста;
+    - медиа только из enclosure ленты.
+  - live-лента и emerging: нет `max://`/`telegram://`, только `https://` или `null`.
+- **`tests/test_live_network.py`** (маркер `live`) — 4 теста выше.
+
+### Баги v3
+
+Реальных багов в коде v3 тесты не выявили: финальный прогон зелёный. Падения, о которых сообщил координатор, — не баги:
+- 38 падений без `DATA_MODE` — в окружении тестов не был задан режим;
+- 3 падения с `DATA_MODE=demo` — тесты удаления источника были написаны под старый контракт v2.
+
+Обе причины исправлены в тестах.
+
+Баги v2 №4–7 (backend) к прогону v3 исправлены, их тесты зелёные. Таблица v2 — ниже.
+
+### Не покрыто в v3
+
+- MAX Bot API с реальным токеном (`platform-api2.max.ru`, TLS Минцифры) — нет токена.
+- Telethon — нет сессии.
+- Ответ Claude (LLM с ключом) — проверка «каждое утверждение со `source_id`» сделана только для ExtractiveLLM.
+- Фоновая задача RSS-ingest в lifespan (`RSS_POLL_INTERVAL`) — только сама функция `sync_rss`.
+- UI превью источника и бейдж режима — без браузерных тестов.
+
+---
+
+# Отчёт QA v2 (2026-11-14)
 
 Дата: 2026-11-14. Окружение: Windows 11, Python 3.12.6, pytest 9.1.1, pytest-asyncio 1.4.0, SQLite (aiosqlite).
 Запуск: `pytest` (конфиг `pytest.ini`, `asyncio_mode = auto`). Полный прогон ~2 мин (из них ~45 с — e2e с настоящим uvicorn).
@@ -6,7 +94,7 @@
 
 ## Итог финального прогона
 
-**380 тестов: 376 прошли, 4 упали (открытые баги №4–№7), 0 skip/xfail.**
+**380 тестов: 376 прошли, 4 упали (баги №4–№7; к прогону v3 2026-11-15 исправлены), 0 skip/xfail.**
 Финальный прогон — после того, как файлы фронтенда (`app/templates`, `app/static`, `app/routers/pages.py`)
 перестали меняться: последняя правка в 22:35, прогон в 23:03 по местному времени.
 
@@ -78,16 +166,16 @@
 | 1 | backend | `app/services/stories.py:267` (`reopen`) | Сюжет в `researching` → `POST /api/stories/{id}/reopen` | Ожидание: 409 («Вернуть в работу» — только `rejected → review»). Факт: 200, сюжет переходил в review (работало как «Остановить») | **Исправлен** бэкендом во время тестирования (проверка статуса, `stories.py:272`) |
 | 2 | backend | `app/services/stories.py:170` (`stop_story`) | Сюжет в `rejected` → `POST /api/stories/{id}/stop` | Ожидание: 409 (только `researching → review`). Факт: 200, rejected → review | **Исправлен** (`stories.py:171`) |
 | 3 | backend (пайплайн) | `app/services/pipeline.py:413–425` | Сюжет в review (3 итерации) → `POST /deeper {"question": "Кто владелец сгоревшего Соляриса"}` | Ожидание: CHAIN SEARCH +1 итерация (CONTRACTS_v2 §4.3). Факт: снова 3 итерации — запросы по вопросу шли в итерацию 1, цепочка останавливалась раньше `max_it` | **Исправлен** (`test_deeper_adds_one_chain_iteration` проходит) |
-| 4 | backend | `app/services/emerging.py:72–76` (`_important`) | Seed → `GET /api/feed` | Ожидание: бейдж «важное» только у сообщений с фактами; у мусора в `mock_data` `important` не задан, по комментарию это False. Факт: `badges.important=true` у мусора: «Субботник в субботу в 11:00», «Собрание жильцов в четверг в 19:00», «Чья машина перекрыла выезд у 3 подъезда??», «Кто-нибудь нашёл ключи…». Причина: при отсутствии ключа `important` срабатывает эвристика (время + место). Итог — шум на Радаре и в счётчике `important_count` карточек. Фикс: для известных сообщений сценария отсутствие ключа = False | Открыт |
-| 5 | backend | `app/routers/api.py:160` (`_sse`, `json.dumps(default=str)`) и `:190` (hello) | `GET /api/stream?timeout=0` | Ожидание: `server_time` в hello — ISO, как в `FeedOut` (`2026-11-14T19:45:43`). Факт: `"2026-11-14 19:45:43.338671"` (str(datetime), с пробелом). `Date.parse` в Safari такое не разбирает. То же с `updated_at` в событии `story_update` (`api.py:170`) | Открыт (minor) |
-| 6 | backend | `app/integrations/max/demo_stream.py:221–246` (`restart`) | `DEMO_STREAM_ENABLED=false` (или клиент без трикла) → `POST /api/demo/restart` → `GET /api/feed` | Ожидание: лента после перезапуска не пустая. Факт: 0 сообщений (было 40). Все сообщения mock-чатов архивируются, а синк в режиме без трикла отдаёт те же `external_id` (m01…). Поллер пропускает их как уже известные (`poller.py`, проверка `known_ids` не учитывает `archived`) — лента пустеет навсегда | Открыт |
-| 7 | backend | `app/integrations/max/demo_stream.py:232–242` (+ `poller._sync_platform`) | Подключить mock-Telegram → включённый трикл → `POST /api/demo/restart` → синк → `GET /api/feed?platform=telegram` | Ожидание: 7 постов mock-Telegram снова в ленте (якорь = старт − 125 мин, «Изменения» v2.1). Факт: 0. Restart архивирует TG-сообщения, а у mock-TG постоянные `external_id` (8812…) — поллер их больше не вставляет. После «Перезапустить демо-поток» с Радара пропадает кросс-платформенный дубль «Москва Live» ↔ m09/m10 и TG-свидетель. Фикс: не архивировать TG либо давать TG-постам суффикс эпохи / разархивировать при повторной выдаче | Открыт |
+| 4 | backend | `app/services/emerging.py:72–76` (`_important`) | Seed → `GET /api/feed` | Ожидание: бейдж «важное» только у сообщений с фактами; у мусора в `mock_data` `important` не задан, по комментарию это False. Факт: `badges.important=true` у мусора: «Субботник в субботу в 11:00», «Собрание жильцов в четверг в 19:00», «Чья машина перекрыла выезд у 3 подъезда??», «Кто-нибудь нашёл ключи…». Причина: при отсутствии ключа `important` срабатывает эвристика (время + место). Итог — шум на Радаре и в счётчике `important_count` карточек. Фикс: для известных сообщений сценария отсутствие ключа = False | **Исправлен** (тест зелёный в прогоне v3, 2026-11-15) |
+| 5 | backend | `app/routers/api.py:160` (`_sse`, `json.dumps(default=str)`) и `:190` (hello) | `GET /api/stream?timeout=0` | Ожидание: `server_time` в hello — ISO, как в `FeedOut` (`2026-11-14T19:45:43`). Факт: `"2026-11-14 19:45:43.338671"` (str(datetime), с пробелом). `Date.parse` в Safari такое не разбирает. То же с `updated_at` в событии `story_update` (`api.py:170`) | **Исправлен** (тест зелёный в прогоне v3, 2026-11-15) |
+| 6 | backend | `app/integrations/max/demo_stream.py:221–246` (`restart`) | `DEMO_STREAM_ENABLED=false` (или клиент без трикла) → `POST /api/demo/restart` → `GET /api/feed` | Ожидание: лента после перезапуска не пустая. Факт: 0 сообщений (было 40). Все сообщения mock-чатов архивируются, а синк в режиме без трикла отдаёт те же `external_id` (m01…). Поллер пропускает их как уже известные (`poller.py`, проверка `known_ids` не учитывает `archived`) — лента пустеет навсегда | **Исправлен** (тест зелёный в прогоне v3, 2026-11-15) |
+| 7 | backend | `app/integrations/max/demo_stream.py:232–242` (+ `poller._sync_platform`) | Подключить mock-Telegram → включённый трикл → `POST /api/demo/restart` → синк → `GET /api/feed?platform=telegram` | Ожидание: 7 постов mock-Telegram снова в ленте (якорь = старт − 125 мин, «Изменения» v2.1). Факт: 0. Restart архивирует TG-сообщения, а у mock-TG постоянные `external_id` (8812…) — поллер их больше не вставляет. После «Перезапустить демо-поток» с Радара пропадает кросс-платформенный дубль «Москва Live» ↔ m09/m10 и TG-свидетель. Фикс: не архивировать TG либо давать TG-постам суффикс эпохи / разархивировать при повторной выдаче | **Исправлен** (тест зелёный в прогоне v3, 2026-11-15) |
 
 Багов в зонах **frontend** и **telegram** финальный прогон не выявил:
 - смоук страниц, формы, XSS, `#radar-data` — зелёные;
 - парсер web-превью, mock-клиент, `parse_tg_ref` — зелёные.
 
-Открытые баги №4–7 — зона backend.
+Баги №4–7 (backend) исправлены к прогону v3 2026-11-15.
 
 ## Замечания (не баги / решения разработчиков, зафиксированные тестами)
 

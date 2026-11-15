@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+<channel>
+  <title>Городские новости QA</title>
+  <link>https://qa-news.example/</link>
+  <description>Лента QA</description>
+  <image><url>https://qa-news.example/logo.png</url></image>
+  <item>
+    <title>В Москве на Варшавском шоссе загорелся автобус</title>
+    <link>https://qa-news.example/news/bus-fire</link>
+    <guid>https://qa-news.example/news/bus-fire</guid>
+    <description><![CDATA[<p>Пожар автобуса на Варшавском шоссе в Москве: пассажиры эвакуированы, движение перекрыто.</p>]]></description>
+    <pubDate>__PUB1__</pubDate>
+    <enclosure url="https://qa-news.example/img/bus.jpg" type="image/jpeg" length="1"/>
+  </item>
+  <item>
+    <title>В Новосибирске на шоссе загорелся автобус</title>
+    <link>https://qa-news.example/news/nsk-bus</link>
+    <guid>qa-nsk-bus</guid>
+    <description>Пожар автобуса в Новосибирске, пассажиры эвакуированы.</description>
+    <pubDate>__PUB2__</pubDate>
+  </item>
+  <item>
+    <title>Собянин открыл новую школу в Некрасовке</title>
+    <link>https://qa-news.example/news/school</link>
+    <description>Новая школа на 1100 мест.</description>
+    <pubDate>__PUB3__</pubDate>
+  </item>
+</channel>
+</rss>

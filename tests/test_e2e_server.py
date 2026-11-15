@@ -35,9 +35,10 @@ def server(tmp_path):
     port = _free_port()
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("ANTHROPIC", "MAX_", "TAVILY", "SERPER", "LLM_", "SEARCH_", "TG_", "DEMO_",
-                                "PIPELINE_", "SSE_", "DATABASE_", "SEED_"))}
+                                "PIPELINE_", "SSE_", "DATABASE_", "SEED_", "DATA_MODE", "RSS_"))}
     env.update({
         "DATABASE_URL": f"sqlite+aiosqlite:///{(tmp_path / 'server.db').as_posix()}",
+        "DATA_MODE": "demo",
         "PIPELINE_INLINE": "false",
         "MAX_POLLER_ENABLED": "true",
         "MAX_POLL_INTERVAL": "1",

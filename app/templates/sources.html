@@ -7,63 +7,82 @@
     <h1>Источники</h1>
     <div class="btn-row">
       <button class="btn" type="button" data-api="POST /api/sources/sync" data-done="Опрос источников завершён">{{ icon('refresh') }}Опросить сейчас</button>
-      {% if demo and demo.enabled %}
+      {% if demo and demo.enabled and data_mode and data_mode.is_demo %}
       <button class="btn" type="button" data-api="POST /api/demo/restart" data-done="Демо-поток перезапущен" data-confirm="Перезапустить демо-поток? Текущие сообщения уйдут в архив, сюжеты останутся.">{{ icon('radar') }}Перезапустить демо-поток</button>
       {% endif %}
     </div>
   </div>
 
-  {% if demo and demo.enabled %}
+  {% if demo and demo.enabled and data_mode and data_mode.is_demo %}
   <p class="muted" style="margin:0 4px 14px;font-size:14px">
     Демо-поток: {% if demo.finished %}все {{ demo.total }} сообщений сценария уже показаны{% elif demo.active %}показано {{ demo.released }} из {{ demo.total }}, следующее — <span class="t">{{ demo.next_at|dt('time') if demo.next_at else 'скоро' }}</span>{% else %}выключен{% endif %}.
   </p>
   {% endif %}
 
   <div class="pane">
-    <div class="pane__head"><h2>Чаты и каналы</h2><span class="count">{{ chats|length }}</span></div>
+    <div class="pane__head"><h2>Каналы, чаты и ленты</h2><span class="count" data-src-count>{{ chats|length }}</span></div>
     <div class="pane__body">
-      <form class="btn-row" method="post" action="/sources/add" data-add-source style="align-items:flex-end;margin-bottom:14px">
-        <div class="field" style="margin:0">
-          <label for="src-pf">Платформа</label>
-          <select class="input" id="src-pf" name="platform" style="width:150px">
-            <option value="telegram">Telegram</option>
-            <option value="max">MAX</option>
-          </select>
+      <form method="post" action="/sources/add" data-add-source class="addsrc">
+        <input type="hidden" name="platform" value="auto">
+        <div class="addsrc__row">
+          <div class="field addsrc__ref">
+            <label for="src-ref">Ссылка или @username</label>
+            <input class="input" id="src-ref" name="ref" required autocomplete="off" spellcheck="false" placeholder="t.me/channel, @channel, max.ru/channel или сайт СМИ">
+          </div>
+          <div class="field addsrc__district">
+            <label for="src-d">Район (необязательно)</label>
+            <input class="input" id="src-d" name="district" placeholder="Чертаново">
+          </div>
+          <button class="btn btn--primary" type="submit" data-add-btn disabled>{{ icon('plus') }}Добавить</button>
         </div>
-        <div class="field" style="margin:0;flex:1;min-width:220px">
-          <label for="src-ref">Канал или чат</label>
-          <input class="input" id="src-ref" name="ref" required placeholder="@channel или https://t.me/channel">
-        </div>
-        <div class="field" style="margin:0;width:200px;max-width:100%">
-          <label for="src-d">Район (необязательно)</label>
-          <input class="input" id="src-d" name="district" placeholder="Чертаново">
-        </div>
-        <button class="btn btn--primary" type="submit">{{ icon('plus') }}Добавить источник</button>
+        <div class="preview" data-preview aria-live="polite" hidden></div>
       </form>
-      <p class="muted" style="font-size:13px;margin:-4px 0 14px">Публичные Telegram-каналы и чаты читаются по ссылке. Домовые чаты MAX подключаются ботом, которого добавил администратор чата с согласия участников.</p>
+      <p class="muted" style="font-size:13px;margin:0 0 14px">Вставьте ссылку — название, платформа и число подписчиков подтянутся сами. Telegram читается через открытое превью канала, сайты СМИ — через их RSS. Домовые чаты MAX подключаются ботом, которого добавил администратор чата.</p>
 
       {% if chats %}
-      <table class="table">
-        <thead><tr><th>Источник</th><th>Район</th><th class="num">Сообщений</th><th class="num">Последнее сообщение</th><th class="num">Опрос</th><th>Слушать</th></tr></thead>
+      <table class="table table--src" data-src-table>
+        <thead><tr><th>Источник</th><th>Район</th><th class="num">Сообщений</th><th class="num">Последнее сообщение</th><th class="num">Опрос</th><th>Слушать</th><th><span class="sr-only">Удалить</span></th></tr></thead>
         <tbody>
           {% for c in chats %}
-          <tr>
-            <td>{{ platform(c.platform|ev) }} <b style="margin-left:4px">{{ c.title }}</b>
-              {% if c.ref %}<div class="muted" style="font-size:13px;overflow-wrap:anywhere">{% if c.ref|safe_url %}<a href="{{ c.ref }}" target="_blank" rel="noopener noreferrer">{{ c.ref }}</a>{% else %}{{ c.ref }}{% endif %}</div>{% endif %}</td>
-            <td>{{ c.district or '—' }}</td>
-            <td class="num">{{ c.messages_count }}</td>
-            <td class="num">{{ last_msg.get(c.id)|dt if last_msg.get(c.id) else '—' }}</td>
-            <td class="num">{% if not c.enabled %}<span class="muted">выключен</span>{% elif c.last_synced_at %}{{ c.last_synced_at|ago }}{% else %}<span class="muted">ещё не было</span>{% endif %}</td>
+          {% set link = c.url or c.site_url or c.ref %}
+          <tr data-src-row="{{ c.id }}">
+            <td>
+              <div class="srcrow">
+                {% if c.avatar_url|safe_url %}<img class="ava" src="{{ c.avatar_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% else %}<span class="ava ava--ph">{{ c.title|initials }}</span>{% endif %}
+                <div class="srcrow__main">
+                  <div><b>{{ c.title }}</b></div>
+                  <div class="srcrow__meta">{{ platform(c.platform|ev) }}{% if c.kind %}<span>{{ KIND_LABELS.get(c.kind, c.kind) }}</span>{% endif %}{% if c.subscribers %}<span class="t">{{ '{:,}'.format(c.subscribers).replace(',', ' ') }} {{ 'подписчиков' if c.subscribers >= 10000 else plural(c.subscribers, 'подписчик', 'подписчика', 'подписчиков') }}</span>{% endif %}{% if link|safe_url %}<a class="ext" href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ link|host }}</a>{% elif c.ref %}<span>{{ c.ref }}</span>{% endif %}</div>
+                </div>
+              </div>
+            </td>
+            <td data-label="Район">{{ c.district or '—' }}</td>
+            <td class="num" data-label="Сообщений">{{ c.messages_count }}</td>
+            <td class="num" data-label="Последнее">{{ last_msg.get(c.id)|dt if last_msg.get(c.id) else '—' }}</td>
+            <td class="num" data-label="Опрос">{% if not c.enabled %}<span class="muted">выключен</span>{% elif c.last_synced_at %}{{ c.last_synced_at|ago }}{% else %}<span class="muted">ещё не было</span>{% endif %}</td>
             <td><label class="switch" title="{{ 'Слушаем' if c.enabled else 'Не слушаем' }}"><input type="checkbox" data-toggle-chat="{{ c.id }}" {{ 'checked' if c.enabled }} aria-label="Слушать {{ c.title }}"><span></span></label></td>
+            <td><button class="icon-btn icon-btn--danger" type="button" data-del-src="{{ c.id }}" data-title="{{ c.title }}" aria-label="Удалить источник {{ c.title }}" title="Удалить источник">{{ icon('trash') }}</button></td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
-      {% else %}
-      <div class="empty"><b>Источников нет</b>Добавьте публичный Telegram-канал формой выше.</div>
       {% endif %}
+      <div class="empty" data-src-empty {{ 'hidden' if chats }}><b>Источников нет</b>Вставьте ссылку на публичный Telegram-канал или сайт СМИ в поле выше.</div>
     </div>
   </div>
+
+<dialog class="modal" id="dlg-del-src" aria-labelledby="dlg-del-h">
+  <form method="dialog" data-del-form>
+    <div class="modal__head"><h2 id="dlg-del-h">Удалить источник?</h2><button class="icon-btn" type="button" data-close aria-label="Закрыть">{{ icon('x') }}</button></div>
+    <div class="modal__body">
+      <p><b data-del-title></b></p>
+      <p class="muted" style="font-size:14px">Сообщения источника уйдут из ленты и возможных сюжетов. В уже созданных сюжетах цитаты и ссылки сохранятся. Источник можно добавить снова по той же ссылке.</p>
+    </div>
+    <div class="modal__foot">
+      <button class="btn btn--quiet" type="button" data-close>Отмена</button>
+      <button class="btn btn--stop" type="submit">Удалить источник</button>
+    </div>
+  </form>
+</dialog>
 
   <h2 class="section-gap" style="margin:24px 4px 4px">Стиль каналов</h2>
   <p class="muted" style="margin:0 4px 12px;font-size:14px">AI пишет черновик в манере канала: длина, заголовок, абзацы, хэштеги. Профиль строится по последним постам.</p>

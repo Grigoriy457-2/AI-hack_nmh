@@ -25,6 +25,44 @@ logging.basicConfig(level=logging.DEBUG if settings.DEBUG else logging.INFO)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+async def upgrade_schema() -> None:
+    """Добавить недостающие колонки в существующие таблицы (v3: source_chats.avatar_url и т.п.)."""
+    try:
+        from app.models import add_missing_columns
+
+        async with db.engine.begin() as conn:
+            added = await conn.run_sync(add_missing_columns)
+        if added:
+            log.info("Schema upgrade: added columns %s", ", ".join(added))
+    except Exception:  # noqa: BLE001
+        log.exception("Schema upgrade failed")
+
+
+def _start_rss() -> asyncio.Task | None:
+    """Фоновая выгрузка RSS-источников (platform='rss'); вместе с поллером (в тестах выключен)."""
+    if not settings.MAX_POLLER_ENABLED or not getattr(settings, "RSS_INGEST_ENABLED", True):
+        return None
+    interval = max(60, int(getattr(settings, "RSS_POLL_INTERVAL", 0) or 300))
+
+    async def _loop() -> None:
+        from app.services.sources import sync_rss
+
+        await asyncio.sleep(5)
+        while True:
+            try:
+                async with db.session_scope() as session:
+                    res = await sync_rss(session)
+                if res.new_messages or res.errors:
+                    log.info("RSS sync: chats=%s new=%s errors=%s", res.chats, res.new_messages, res.errors[:3])
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("RSS sync failed")
+            await asyncio.sleep(interval)
+
+    return asyncio.create_task(_loop(), name="newsflow-rss")
+
+
 async def _seed() -> None:
     if not settings.SEED_ON_STARTUP:
         return
@@ -88,17 +126,21 @@ async def _stop_telegram(tasks: list[asyncio.Task]) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
+    await upgrade_schema()
     await _seed()
     poller = _start_poller()
     tg_tasks = _start_telegram()
+    rss_task = _start_rss()
     try:
         yield
     finally:
         await _stop_telegram(tg_tasks)
-        if poller is not None:
-            poller.cancel()
+        for task in (poller, rss_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await poller
+                await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         await db.dispose()

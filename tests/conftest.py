@@ -37,6 +37,7 @@ os.environ.update(
         "TG_API_ID": "",
         "TG_API_HASH": "",
         "TG_BOT_TOKEN": "",
+        "DATA_MODE": "demo",
         "DEMO_STREAM_ENABLED": "false",
         "DEMO_STREAM_LOOP": "false",
         "ANTHROPIC_API_KEY": "",
@@ -80,6 +81,70 @@ def reset_globals() -> None:
     set_search_provider(MockSearchProvider())
     set_max_client(MockMaxClient(stream=False))
     set_telegram_client(MockTelegramClient())
+    _reset_v3_caches()
+
+
+def _reset_v3_caches() -> None:
+    """Кэши v3 (resolve, ленты RSS, Google News, og:image) — между тестами не переносятся."""
+    from app.integrations import rss, search
+    from app.integrations.max import public as max_public
+    from app.integrations.telegram import resolve as tg_resolve
+    from app.services import sources
+
+    sources.clear_resolve_cache()
+    tg_resolve._cache.clear()
+    max_public._cache.clear()
+    rss.reset_cache()
+    rss._feed_locks.clear()
+    search._og_cache.clear()
+
+
+# ---------------------------------------------------------------- сеть
+class FakeNet:
+    """Подмена внешней сети для httpx.AsyncClient без явного transport (все клиенты приложения).
+
+    ``fake_net.route(url_or_prefix, response | callable(request) -> response)``; совпадение — точный URL
+    или префикс (самый длинный). Всё остальное — ConnectError «сеть в тестах отключена».
+    ``fake_net.calls`` — запрошенные URL."""
+
+    def __init__(self) -> None:
+        self.routes: dict[str, object] = {}
+        self.calls: list[str] = []
+
+    def route(self, url: str, resp) -> None:
+        self.routes[url] = resp
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        self.calls.append(url)
+        key = url if url in self.routes else max((k for k in self.routes if url.startswith(k)), key=len, default=None)
+        if key is None:
+            raise httpx.ConnectError(f"сеть в тестах отключена: {url}", request=request)
+        resp = self.routes[key]
+        resp = resp(request) if callable(resp) else resp
+        if isinstance(resp, httpx.Response):
+            return httpx.Response(resp.status_code, headers=resp.headers, content=resp.content, request=request)
+        return resp
+
+
+_ORIG_ASYNC_INIT = httpx.AsyncClient.__init__
+
+
+@pytest.fixture(autouse=True)
+def fake_net(request, monkeypatch) -> FakeNet:
+    """По умолчанию тесты не ходят в сеть (кроме маркера ``live``)."""
+    net = FakeNet()
+    if request.node.get_closest_marker("live"):
+        yield net
+        return
+
+    def init(self, *a, **kw):
+        if kw.get("transport") is None and kw.get("app") is None:
+            kw["transport"] = httpx.MockTransport(net.handler)
+        _ORIG_ASYNC_INIT(self, *a, **kw)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+    yield net
 
 
 # ---------------------------------------------------------------- БД

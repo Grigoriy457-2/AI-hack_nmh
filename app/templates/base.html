@@ -25,6 +25,25 @@
   </nav>
   {% endif %}
   <div class="top__right">
+    {% if data_mode %}
+    <div class="mode {{ 'mode--demo' if data_mode.is_demo else 'mode--live' }}" data-mode-pop>
+      <button type="button" class="mode__btn" aria-expanded="false" aria-controls="mode-pop" title="Откуда данные">
+        <span class="mode__label">{{ data_mode.ui_label }}</span>{% if data_mode.ui_ai %}<span class="mode__ai">{{ data_mode.ui_ai }}</span>{% endif %}
+      </button>
+      <div class="mode__pop" id="mode-pop" role="tooltip">
+        <b>{{ data_mode.ui_label }}</b>
+        {% if data_mode.is_demo %}<p>Сообщения, источники и ссылки синтетические: сценарий для показа без интернета.</p>
+        {% else %}<p>Сообщения берутся из реальных публичных каналов и лент, ссылки ведут на настоящие страницы.</p>{% endif %}
+        {% if data_mode.ui_ai %}<p><b>{{ data_mode.ui_ai }}.</b> {% if data_mode.llm == 'extractive' %}Справка и черновик собираются из цитат найденных источников, без пересказа нейросетью.{% elif data_mode.llm == 'anthropic' %}Справку и черновик пишет нейросеть, каждое утверждение со ссылкой на источник.{% else %}Ответы AI заранее заготовлены для демо-сценария.{% endif %}</p>{% endif %}
+        {% for n in data_mode.notes or [] %}<p class="muted">{{ n }}</p>{% endfor %}
+        <dl class="kv">
+          {% if data_mode.telegram_provider %}<dt>Telegram</dt><dd>{{ data_mode.telegram_provider }}</dd>{% endif %}
+          {% if data_mode.max_provider %}<dt>MAX</dt><dd>{{ data_mode.max_provider }}</dd>{% endif %}
+          {% if data_mode.search_providers %}<dt>Поиск</dt><dd>{{ data_mode.search_providers|join(', ') }}</dd>{% endif %}
+        </dl>
+      </div>
+    </div>
+    {% endif %}
     {% if user %}
     <span class="onair" id="onair" title="Лента обновляется сама"><span class="onair__dot"></span><span class="onair__label">В эфире{% if live_sources_count is defined and live_sources_count %}: {{ live_sources_count }} {{ plural(live_sources_count, 'источник', 'источника', 'источников') }}{% endif %}</span></span>
     {% endif %}

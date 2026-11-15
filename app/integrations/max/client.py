@@ -1,7 +1,9 @@
 """MAX (домовые чаты) — контракт клиента. Зона DEV-BACKEND.
 
-Реализации: ``bot_api.MaxBotApiClient`` (Bot API https://platform-api.max.ru, MAX_BOT_TOKEN,
-httpx async) и ``mock.MockMaxClient`` (4–5 чатов района, ~40 сообщений). Синхронизация в БД —
+Реализации: ``bot_api.MaxBotApiClient`` (Bot API https://platform-api2.max.ru, MAX_BOT_TOKEN,
+httpx async), ``public.MaxPublicClient`` (live без токена: метаданные публичных каналов max.ru,
+постов без входа нет — docs/MAX.md) и ``mock.MockMaxClient`` (DATA_MODE=demo: 4–5 чатов района,
+~40 сообщений). ``public.resolve_max(ref)`` — название/тип/аватар/подписчики по ссылке. Синхронизация в БД —
 ``poller.py``. Получать клиента только через ``get_max_client()``.
 
 Идентификаторы MAX — строки (external_id). Время — naive UTC.
@@ -66,23 +68,46 @@ class MaxClient(ABC):
 _client: MaxClient | None = None
 
 
+def _split(v: str | None) -> list[str]:
+    return [x.strip() for x in (v or "").replace(";", ",").split(",") if x.strip()]
+
+
+def build_max_client() -> MaxClient:
+    """MAX_PROVIDER: bot (или auto + MAX_BOT_TOKEN) → MaxBotApiClient; web (или auto в live без
+    токена) → MaxPublicClient (только метаданные публичных каналов, постов нет); mock (или auto в
+    demo) → MockMaxClient."""
+    from app.config import settings
+
+    prov = settings.MAX_PROVIDER
+    if prov in ("bot", "auto") and settings.MAX_BOT_TOKEN:
+        from app.integrations.max.bot_api import MaxBotApiClient
+
+        verify: object = True
+        if settings.MAX_CA_BUNDLE:  # certifi + сертификат Минцифры (Russian Trusted Root CA)
+            import ssl
+
+            import certifi
+
+            ctx = ssl.create_default_context(cafile=certifi.where())
+            ctx.load_verify_locations(cafile=settings.MAX_CA_BUNDLE)
+            verify = ctx
+        return MaxBotApiClient(settings.MAX_BOT_TOKEN, settings.MAX_API_BASE,
+                               fallback_base_url=settings.MAX_API_FALLBACK_BASE, verify=verify,
+                               chat_ids=_split(settings.MAX_CHAT_IDS))
+    if prov == "web" or (prov in ("auto", "bot") and settings.is_live):
+        from app.integrations.max.public import MaxPublicClient
+
+        return MaxPublicClient(_split(settings.MAX_SOURCES))
+    from app.integrations.max.mock import MockMaxClient
+
+    return MockMaxClient()
+
+
 def get_max_client() -> MaxClient:
-    """MAX_PROVIDER=auto → MaxBotApiClient при наличии MAX_BOT_TOKEN, иначе MockMaxClient."""
+    """Синглтон (см. ``build_max_client``)."""
     global _client
     if _client is None:
-        from app.config import settings
-
-        use_bot = settings.MAX_PROVIDER == "bot" or (
-            settings.MAX_PROVIDER == "auto" and bool(settings.MAX_BOT_TOKEN)
-        )
-        if use_bot and settings.MAX_BOT_TOKEN:
-            from app.integrations.max.bot_api import MaxBotApiClient
-
-            _client = MaxBotApiClient(settings.MAX_BOT_TOKEN, settings.MAX_API_BASE)
-        else:
-            from app.integrations.max.mock import MockMaxClient
-
-            _client = MockMaxClient()
+        _client = build_max_client()
     return _client
 
 
