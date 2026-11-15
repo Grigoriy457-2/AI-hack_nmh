@@ -169,7 +169,9 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
   padding: 14px 16px 10px;
 }
 .pane__head h2 { margin-right: auto; }
-.pane__body { padding: 0 16px 16px; overflow-y: auto; flex: 1; min-height: 0; overscroll-behavior: contain; }
+/* Без overscroll-behavior: contain — докрутив колонку до края, тачпад продолжает крутить страницу.
+   overflow-anchor: auto — браузер сам держит читаемое сообщение, когда сверху приходят новые. */
+.pane__body { padding: 0 16px 16px; overflow-y: auto; flex: 1; min-height: 0; overflow-anchor: auto; }
 .pane__body--flush { padding: 0 0 16px; }
 .stack { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
 .stack > .pane { flex: none; }
@@ -363,7 +365,7 @@ a.ext:hover { color: var(--ink); text-decoration-color: currentColor; }
 }
 .story-desk > .stack, .story-desk > .pane { position: sticky; top: calc(var(--top-h) + var(--gap)); max-height: calc(100vh - var(--top-h) - 2 * var(--gap)); }
 .story-desk > .pane--main { position: static; max-height: none; }
-.story-desk > .stack { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.story-desk > .stack { overflow-y: auto; scrollbar-width: thin; }
 .story-desk > .stack > .pane, .story-desk > .stack > .pane--grow { flex: none; }
 .story-desk .pane__body { overflow: visible; }
 

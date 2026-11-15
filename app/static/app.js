@@ -221,6 +221,7 @@
     var filter = 'all';
     var unseenAbove = 0;
     var MAX_ITEMS = 250;
+    var NATIVE_ANCHOR = !!(window.CSS && CSS.supports && CSS.supports('overflow-anchor', 'auto'));
     var emerging = data.emerging || [];
 
     function msgMatches(li) {
@@ -290,7 +291,17 @@
       var ts = function (m) { var d = parseISO(m.sent_at); return d ? d.getTime() : 0; };
       fresh.sort(function (a, b) { return ts(a) - ts(b) || a.id - b.id; });
       var atTop = !scroller || scroller.scrollTop < 40;
-      var before = scroller ? scroller.scrollHeight : 0;
+      // Удерживаем то, что редактор читает. В Chrome/Edge/Firefox это делает сам браузер
+      // (overflow-anchor), не трогая scrollTop — иначе обрывается инерция тачпада.
+      // Ручная подстройка — только там, где scroll anchoring не поддерживается (Safari).
+      var anchor = null, anchorTop = 0;
+      if (live && scroller && !atTop && !NATIVE_ANCHOR) {
+        var top = scroller.getBoundingClientRect().top;
+        for (var a = list.firstChild; a; a = a.nextSibling) {
+          if (a.nodeType === 1 && !a.hidden && a.getBoundingClientRect().bottom > top) { anchor = a; break; }
+        }
+        if (anchor) anchorTop = anchor.getBoundingClientRect().top;
+      }
       fresh.forEach(function (m) {
         seen[m.id] = true;
         if (m.id > cursor) cursor = m.id;
@@ -307,8 +318,9 @@
       });
       var all = $$('.msg', list);
       for (var i = MAX_ITEMS; i < all.length; i++) { all[i].remove(); }
-      if (live && scroller && !atTop) {
-        scroller.scrollTop += scroller.scrollHeight - before;   // не сдвигаем то, что редактор читает
+      if (anchor && anchor.isConnected) {
+        var shift = anchor.getBoundingClientRect().top - anchorTop;
+        if (Math.abs(shift) >= 1) scroller.scrollTop += shift;
       }
       if (newBtn) {
         newBtn.textContent = unseenAbove + ' ' + plural(unseenAbove, 'новое сообщение', 'новых сообщения', 'новых сообщений') + ', показать';
