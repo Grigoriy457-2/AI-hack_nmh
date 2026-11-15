@@ -29,3 +29,6 @@ Thumbs.db
 *.session
 *.session-journal
 data/telegram/
+
+# Claude Code (локальные настройки превью)
+.claude/
