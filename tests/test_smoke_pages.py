@@ -146,15 +146,19 @@ async def test_stories_list(editor, users, review_story):
     ho = await make_story(users, S.handed_off, title="QA переданный сюжет")
     rj = await make_story(users, S.rejected, title="QA отклонённый сюжет")
     t = _text(assert_clean_html(await editor.get("/stories")))
-    for title in ("QA: хлопок в Чертанове", "QA переданный сюжет", "QA отклонённый сюжет"):
+    for title in ("QA: хлопок в Чертанове", "QA переданный сюжет"):
         assert title in t
+    # v4: «Не подтвердилось» уходит в архив
+    assert "QA отклонённый сюжет" not in t
+    t = t + _text(assert_clean_html(await editor.get("/stories?archived=1")))
+    assert "QA отклонённый сюжет" in t
     for label in ("На проверке", "Передано дальше", "Не подтвердилось"):
         assert label in t
     t = _text(assert_clean_html(await editor.get("/stories", params={"status": "handed_off"})))
     assert "QA переданный сюжет" in t and "QA отклонённый сюжет" not in t
     assert f"/stories/{ho}" in assert_clean_html(await editor.get("/stories", params={"status": "handed_off"}))
     assert_clean_html(await editor.get("/stories", params={"status": "bogus"}))
-    t = _text(assert_clean_html(await editor.get("/stories", params={"q": "отклонённый"})))
+    t = _text(assert_clean_html(await editor.get("/stories", params={"q": "отклонённый", "archived": "1"})))
     assert "QA отклонённый сюжет" in t and "QA переданный сюжет" not in t
     assert rj
 

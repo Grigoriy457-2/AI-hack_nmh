@@ -142,18 +142,17 @@ async def test_contacts_visible_to_editor(make_client, review_story, who):
     sid = review_story["sources"]
     lst = data(await make_client(who).get(f"/api/stories/{review_story['id']}/contacts"))
     got = {c["source_id"]: c for c in lst}
-    assert set(got) == {sid["s1"], sid["s3"]}, (
-        "контакты = чат & primary & uniq>=0.5 & important; "
-        f"получили source_ids={sorted(got)}, ожидали {[sid['s1'], sid['s3']]}")
+    # v4: в «Кому позвонить» только авторы с открытым телефоном (s3 — телефон скрыт)
+    assert set(got) == {sid["s1"]}, (
+        "контакты = чат & primary & uniq>=0.5 & important & есть телефон; "
+        f"получили source_ids={sorted(got)}, ожидали {[sid['s1']]}")
     c1 = got[sid["s1"]]
     assert c1["phone"] == "+79990001122" and c1["name"] == "Иван Тестов"
     assert c1["author_external_id"] == "qa-u-phone" and c1["platform"] == "max"
     assert "вспышку" in c1["quote"]
     assert c1["chat_title"] == "QA: ЖК Чертаново Центральное"
-    assert c1["message_url"] == "max://chat/qa-chat-1/qa-m1" and c1["sent_at"]
-    c3 = got[sid["s3"]]
-    assert c3["phone"] is None, "телефон скрыт в профиле -> phone=None"
-    assert [c["source_id"] for c in lst] == [sid["s1"], sid["s3"]], "с телефоном — первыми"
+    assert c1["sent_at"]
+    assert all(c["phone"] for c in lst), "контакты без телефона не показываются"
 
 
 # ================================================================ справка / медиа / итерации

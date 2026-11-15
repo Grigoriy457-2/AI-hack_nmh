@@ -48,7 +48,8 @@ async def test_feed_shape_order_cursor(editor):
         assert FEED_KEYS <= set(m), FEED_KEYS - set(m)
         assert set(m["badges"]) == BADGE_KEYS
         assert m["platform"] == "max" and m["platform_label"] == "MAX"
-        assert (m["message_url"] or "").startswith("max://chat/")
+        # v3+: выдуманных ссылок max:// нет — либо реальная http-ссылка на пост, либо None
+        assert m["message_url"] is None or m["message_url"].startswith("http")
     assert all(m["chat_title"] for m in items)
 
 

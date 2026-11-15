@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import logging
+
+import jinja2
 import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -133,6 +135,9 @@ def fmt_pct(value: Any) -> str:
 
 
 def ev(x: Any) -> Any:
+    # Отсутствующее поле в шаблоне (jinja2 Undefined) — это «нет значения», а не ошибка.
+    if isinstance(x, jinja2.Undefined):
+        return None
     return getattr(x, "value", x)
 
 

@@ -170,7 +170,7 @@ async def test_delete_source_with_story_references(editor, review_story):
     src = data(await editor.get(f"/api/stories/{review_story['id']}/sources"))
     assert len(src) == 6 and all(s["snippet"] for s in src)
     assert all(s["chat_message_id"] for s in src if s["kind"] == "max_chat")
-    assert len(data(await editor.get(f"/api/stories/{review_story['id']}/contacts"))) == 2
+    assert len(data(await editor.get(f"/api/stories/{review_story['id']}/contacts"))) == 1
 
 
 async def test_delete_seed_chat_hides_story_free_messages(editor):

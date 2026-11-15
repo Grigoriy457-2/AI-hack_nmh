@@ -219,7 +219,7 @@ async def test_api_mode_live(anon, monkeypatch):
     monkeypatch.setattr(settings, "DATA_MODE", "live")
     monkeypatch.setattr(settings, "LLM_PROVIDER", "auto")
     monkeypatch.setattr(settings, "SEARCH_PROVIDER", "auto")
-    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", None)
+    monkeypatch.setattr(settings, "XAI_API_KEY", None)
     set_llm(None)
     set_search_provider(None)
     m = data(await anon.get("/api/mode"))
