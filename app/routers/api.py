@@ -576,15 +576,20 @@ def _provider_name(obj: Any) -> str | None:
 async def get_mode() -> ModeOut:
     """Какие данные сейчас в работе: live/demo, LLM, провайдеры Telegram/MAX/поиска. Без входа."""
     llm = None
+    llm_model = None
+    llm_fallback = False
     try:
         from app.ai.llm import get_llm
 
-        llm = _provider_name(get_llm())
+        client = get_llm()
+        llm = _provider_name(client)
+        llm_model = getattr(client, "model", None) if llm == "grok" else None
+        llm_fallback = bool(getattr(client, "disabled_reason", None))
     except Exception as e:  # noqa: BLE001
         log.debug("mode: llm %r", e)
-    if llm and llm not in ("anthropic", "extractive", "mock"):
-        llm = "anthropic" if "anthropic" in llm.lower() or "claude" in llm.lower() else (
-            "extractive" if "extract" in llm.lower() else llm)
+    if llm and llm not in ("grok", "extractive", "mock"):
+        low = llm.lower()
+        llm = "grok" if ("grok" in low or "xai" in low) else ("extractive" if "extract" in low else "mock")
     tg_provider = None
     try:
         from app.integrations.max.poller import telegram_module
@@ -621,7 +626,11 @@ async def get_mode() -> ModeOut:
             search = parts if len(parts) > 1 or search in ([], ["?"]) else search
     except Exception as e:  # noqa: BLE001
         log.debug("mode: data_mode_status %r", e)
-    return ModeOut(data_mode=sources.data_mode(), llm=llm or "mock", telegram_provider=tg_provider,
+    from app.config import LLM_LABELS
+
+    extra.pop("llm_label", None)
+    return ModeOut(data_mode=sources.data_mode(), llm=llm or "mock", llm_label=LLM_LABELS.get(llm or "mock"),
+                   llm_model=llm_model, llm_fallback=llm_fallback, telegram_provider=tg_provider,
                    max_provider=max_provider, search_providers=search, **extra)
 
 

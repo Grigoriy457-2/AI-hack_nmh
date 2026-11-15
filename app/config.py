@@ -37,10 +37,11 @@ class Settings(BaseSettings):
     SEED_ON_STARTUP: bool = True  # seed, если таблица users пуста
 
     # --- LLM ---
-    # auto: anthropic если есть ключ; иначе live → extractive (без выдумок), demo → mock
-    LLM_PROVIDER: Literal["auto", "anthropic", "extractive", "mock"] = "auto"
-    ANTHROPIC_API_KEY: str | None = None
-    LLM_MODEL: str = "claude-sonnet-5-5"
+    # auto: grok, если есть XAI_API_KEY; иначе live → extractive (без выдумок), demo → mock
+    LLM_PROVIDER: Literal["auto", "grok", "extractive", "mock"] = "auto"
+    XAI_API_KEY: str | None = None  # https://console.x.ai
+    XAI_MODEL: str = "grok-4"  # актуальные id: GET {XAI_BASE_URL}/models
+    XAI_BASE_URL: str = "https://api.x.ai/v1"
     LLM_TIMEOUT: float = 60.0
     LLM_MAX_TOKENS: int = 4000
 
@@ -95,7 +96,7 @@ class Settings(BaseSettings):
     TG_WEB_POLL_INTERVAL: int = 30
 
     @field_validator("TG_API_ID", "TG_API_HASH", "TG_BOT_TOKEN", "MAX_BOT_TOKEN", "MAX_CA_BUNDLE",
-                     "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY", mode="before")
+                     "XAI_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY", mode="before")
     @classmethod
     def _empty_to_none(cls, v: object) -> object:
         return None if isinstance(v, str) and not v.strip() else v
@@ -130,12 +131,13 @@ settings = get_settings()
 
 
 DATA_MODE_LABELS = {"live": "Реальные данные", "demo": "Демо (синтетика)"}
+LLM_LABELS = {"grok": "AI-анализ (Grok)", "extractive": "Анализ по цитатам (без LLM)", "mock": "Демо-анализ (mock)"}
 
 
 def data_mode_status() -> dict:
     """Для UI/API (бейдж режима): какой режим и какие провайдеры реально выбраны.
 
-    ``{"mode": "live", "label": "Реальные данные", "llm": "anthropic|extractive|mock",
+    ``{"mode": "live", "label": "Реальные данные", "llm": "grok|extractive|mock",
     "search": "rss+google_news|tavily+rss|mock…", "max": "bot|web|mock", "telegram": "web|telethon|bot|mock",
     "rss_ingest": bool, "notes": [..]}``. Ошибки провайдеров не пробрасываются."""
     out: dict = {"mode": settings.DATA_MODE, "label": DATA_MODE_LABELS.get(settings.DATA_MODE, settings.DATA_MODE),
@@ -143,7 +145,11 @@ def data_mode_status() -> dict:
     try:
         from app.ai.llm import get_llm
 
-        out["llm"] = get_llm().name
+        llm = get_llm()
+        out["llm"] = llm.name
+        out["llm_label"] = LLM_LABELS.get(llm.name, llm.name)
+        if getattr(llm, "disabled_reason", None):
+            out["notes"].append(llm.disabled_reason)
     except Exception as e:  # noqa: BLE001
         out["llm"] = f"error: {e}"
     try:
@@ -166,7 +172,7 @@ def data_mode_status() -> dict:
         out["telegram"] = f"error: {e}"
     out["rss_ingest"] = bool(settings.is_live and settings.RSS_INGEST_ENABLED)
     if out.get("llm") == "extractive":
-        out["notes"].append("Без ANTHROPIC_API_KEY: справка собирается из цитат найденных источников, "
+        out["notes"].append("Без XAI_API_KEY: справка собирается из цитат найденных источников, "
                             "противоречия — только явные")
     if out.get("max") == "web":
         out["notes"].append("MAX без токена бота: доступны только названия/аватары публичных каналов, "

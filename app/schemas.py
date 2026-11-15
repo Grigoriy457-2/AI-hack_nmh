@@ -130,7 +130,10 @@ class SourceDeleteOut(BaseModel):
 
 class ModeOut(BaseModel):
     data_mode: str  # live | demo
-    llm: str  # anthropic | extractive | mock
+    llm: str  # grok | extractive | mock
+    llm_label: str | None = None  # «AI-анализ (Grok)» | «Анализ по цитатам (без LLM)» | «Демо-анализ (mock)»
+    llm_model: str | None = None  # для grok — XAI_MODEL
+    llm_fallback: bool = False  # Grok отклонил ключ (401/403) — работает запасной анализ
     telegram_provider: str | None = None
     max_provider: str | None = None
     search_providers: list[str] = Field(default_factory=list)
@@ -183,7 +186,8 @@ class FeedMessage(BaseModel):
     has_media: bool = False
     media_url: str | None = None
     is_forwarded: bool = False
-    message_url: str | None = None
+    message_url: str | None = None  # пост; если ссылки на пост нет — чат/канал (см. link_kind)
+    link_kind: str = "none"  # post | chat | none
     badges: FeedBadges = Field(default_factory=FeedBadges)
     uniqueness_score: float | None = None
     emerging_key: str | None = None
@@ -336,7 +340,8 @@ class SourceOut(ORM):
     id: int
     kind: SourceKind
     title: str | None = None
-    url: str | None = None
+    url: str | None = None  # пост; если нет — чат/канал (link_kind)
+    link_kind: str = "none"  # post | chat | none
     snippet: str | None = None
     published_at: datetime | None = None
     chat_message_id: int | None = None
@@ -362,7 +367,8 @@ class ContactOut(BaseModel):
     chat_title: str | None = None
     platform: str = "max"
     sent_at: datetime | None = None
-    message_url: str | None = None
+    message_url: str | None = None  # пост; если нет — чат/канал
+    link_kind: str = "none"  # post | chat | none
     uniqueness_score: float | None = None
 
 

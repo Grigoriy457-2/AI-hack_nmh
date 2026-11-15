@@ -1,4 +1,4 @@
-"""Экстрактивный «LLM» для DATA_MODE=live без ANTHROPIC_API_KEY (зона DEV-REALDATA).
+"""Экстрактивный «LLM» для DATA_MODE=live без XAI_API_KEY (зона DEV-REALDATA).
 
 Тот же интерфейс, что у ``LLMClient`` (``complete_json(..., task=...)``), но НИЧЕГО не сочиняет:
 каждый пункт справки и черновика — цитата/пересказ заголовка реального найденного источника с его
@@ -28,7 +28,7 @@ from app.ai.text import first_sentence, stem, stems, words
 
 NO_LLM_NOTE = "Анализ экстрактивный (без LLM): только цитаты найденных источников, без обобщений."
 CONTRADICTIONS_NOTE = ("Явных расхождений не найдено (проверялись числа погибших/пострадавших и версии "
-                       "«взрыв»/«пожар»). Смысловой поиск противоречий требует LLM (ANTHROPIC_API_KEY).")
+                       "«взрыв»/«пожар»). Смысловой поиск противоречий требует LLM (XAI_API_KEY).")
 
 _GENERIC_WORDS = frozenset("""взял взяли сообщил сообщила сообщили заявил заявила заявили рассказал рассказала
 рассказали стало стал стала стали стали появились появилось произошел произошло произошла назвал назвали
@@ -238,7 +238,7 @@ class ExtractiveLLM(LLMClient):
                 {"agent": "max_chats", "query": f"{kws[0] if kws else ''} {new_terms[0]}".strip()},
             ], "rationale": f"В найденных материалах повторяются детали: {', '.join(new_terms)} — проверяем их."}
         return {"continue": False, "queries": [],
-                "rationale": "Две итерации выполнены; для гипотез глубже нужен LLM (ANTHROPIC_API_KEY)."}
+                "rationale": "Две итерации выполнены; для гипотез глубже нужен LLM (XAI_API_KEY)."}
 
     # ------------------------------------------------------------ RELEVANCE / IMPORTANCE
     def _t_relevance(self, p: dict[str, Any]) -> dict[str, Any]:

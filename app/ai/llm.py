@@ -1,12 +1,13 @@
 """LLM-клиент (контракт). Зона DEV-AI.
 
-Интерфейс ``LLMClient`` + реализации ``AnthropicLLM`` (реальный Claude) и ``MockLLM``
-(детерминированные ответы для демо «Чертаново, хлопок ~14:30» и разумные дженерики).
+Интерфейс ``LLMClient`` + реализации ``GrokLLM`` (xAI Grok, OpenAI-совместимый API) и ``MockLLM``
+(детерминированные ответы для демо «Чертаново, хлопок ~14:30» и разумные дженерики); live без ключа —
+``app.ai.extractive.ExtractiveLLM``.
 Все промпты — в ``app/ai/prompts.py``. Остальной код получает клиента ТОЛЬКО через ``get_llm()``.
 
 Пользовательское сообщение задач — JSON (см. prompts.py); MockLLM разбирает его и отвечает
-по ``task``. AnthropicLLM при ошибке сети/API/парсинга после 1 ретрая логирует и отвечает
-через MockLLM (``fallback_to_mock=True``), чтобы демо не падало.
+по ``task``. GrokLLM при ошибке сети/API/парсинга после ретраев логирует и отвечает через
+``fallback_llm()`` (live — ExtractiveLLM, demo — MockLLM), чтобы пайплайн не падал.
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ class LLMClient(ABC):
         :param schema_hint: пример/описание ожидаемой структуры — добавляется в промпт.
         :param task: машинный ключ задачи ("extract_entities", "chain_hypotheses",
             "relevance", "importance", "intelligence", "report", "draft", ...).
-            MockLLM выбирает ответ по нему; AnthropicLLM может игнорировать.
+            MockLLM выбирает ответ по нему; GrokLLM может игнорировать.
         Реализация обязана распарсить ответ (в т.ч. из ```json блока), при неудаче —
         1 ретрай, затем LLMError.
         """
@@ -73,36 +74,55 @@ class LLMClient(ABC):
         """Закрыть HTTP-ресурсы."""
 
 
-# ================================================================ Anthropic
+# ================================================================ Grok (xAI)
 _HEAVY_TASKS = {"intelligence", "draft", "chain_hypotheses"}
+_RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
 
 
-class AnthropicLLM(LLMClient):
-    """Claude через SDK ``anthropic`` (AsyncAnthropic). Модель — settings.LLM_MODEL.
+class GrokLLM(LLMClient):
+    """Grok через xAI API (OpenAI-совместимый ``POST {base}/chat/completions``, Bearer-ключ).
 
-    Без ``temperature`` (новые модели принимают только значение по умолчанию); глубина
-    рассуждений — ``output_config.effort`` (low для мелких задач, medium для аналитики/черновика).
+    - ``complete_json``: ``response_format={"type": "json_object"}``, устойчивый разбор (```json блоки,
+      текст вокруг), 1 повтор с просьбой вернуть только JSON;
+    - сетевые ошибки / 408/429/5xx — до ``retries`` повторов с паузой;
+    - 401/403 — ключ отклонён: клиент «выключается» и дальше сеть не трогает;
+    - любая ошибка → запасной клиент (``fallback_llm()``: live — ExtractiveLLM, demo — MockLLM).
     """
 
-    name = "anthropic"
+    name = "grok"
 
-    def __init__(self, api_key: str, model: str, timeout: float = 60.0, *,
-                 max_tokens: int | None = None, fallback_to_mock: bool = True) -> None:
+    def __init__(self, api_key: str, model: str = "grok-4", *, base_url: str = "https://api.x.ai/v1",
+                 timeout: float = 60.0, max_tokens: int | None = None, retries: int = 2,
+                 fallback: bool = True, transport: Any = None) -> None:
         self.api_key = api_key
         self.model = model
+        self.base_url = (base_url or "https://api.x.ai/v1").rstrip("/")
         self.timeout = timeout
         self.max_tokens = max_tokens
-        self.fallback_to_mock = fallback_to_mock
+        self.retries = max(0, int(retries))
+        self.fallback = fallback
+        self._transport = transport  # тесты: httpx.MockTransport
         self._client = None
-        self._mock = fallback_llm()  # demo: MockLLM; live: ExtractiveLLM (без синтетики)
-        self._disabled_reason: str | None = None  # 401/403 — дальше сразу MockLLM, без сети
+        self._fallback: LLMClient | None = None
+        self.disabled_reason: str | None = None  # 401/403 — дальше сразу запасной клиент
+        self.last_error: str | None = None
 
+    # -- служебное ---------------------------------------------------------
     def _get_client(self):
-        if self._client is None:
-            from anthropic import AsyncAnthropic
+        import httpx
 
-            self._client = AsyncAnthropic(api_key=self.api_key, timeout=self.timeout, max_retries=1)
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url, timeout=httpx.Timeout(self.timeout, connect=min(10.0, self.timeout)),
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                transport=self._transport,
+            )
         return self._client
+
+    def _get_fallback(self) -> LLMClient:
+        if self._fallback is None:
+            self._fallback = fallback_llm()
+        return self._fallback
 
     def _default_max_tokens(self) -> int:
         if self.max_tokens:
@@ -111,49 +131,63 @@ class AnthropicLLM(LLMClient):
 
         return settings.LLM_MAX_TOKENS
 
-    async def _raw(self, system: str, messages: list[dict[str, Any]], *, task: str | None,
-                   max_tokens: int | None) -> str:
-        import anthropic
+    async def _chat(self, messages: list[dict[str, Any]], *, json_mode: bool, temperature: float,
+                    max_tokens: int | None) -> str:
+        import asyncio
 
-        if self._disabled_reason:
-            raise LLMError(self._disabled_reason)
-        effort = "medium" if task in _HEAVY_TASKS else "low"
-        try:
-            resp = await self._get_client().messages.create(
-                model=self.model,
-                max_tokens=max_tokens or self._default_max_tokens(),
-                system=system,
-                messages=messages,
-                extra_body={"output_config": {"effort": effort}},
-            )
-        except anthropic.APIConnectionError as e:
-            raise LLMError(f"connection error: {e}") from e
-        except anthropic.RateLimitError as e:
-            raise LLMError(f"rate limited: {e}") from e
-        except anthropic.APIStatusError as e:
-            if e.status_code in (401, 403):
-                self._disabled_reason = f"Anthropic API отклонил ключ ({e.status_code}) — используется MockLLM"
-            raise LLMError(f"API status {e.status_code}: {e}") from e
-        except anthropic.AnthropicError as e:
-            raise LLMError(str(e)) from e
-        if getattr(resp, "stop_reason", None) == "refusal":
-            raise LLMError("model refused the request")
-        text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
-        if not text.strip():
-            raise LLMError(f"empty response (stop_reason={getattr(resp, 'stop_reason', None)})")
-        return text
+        import httpx
 
+        if self.disabled_reason:
+            raise LLMError(self.disabled_reason)
+        body: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": temperature,
+                                "max_tokens": max_tokens or self._default_max_tokens()}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                r = await self._get_client().post("/chat/completions", json=body)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last = LLMError(f"network error: {e!r}")
+            else:
+                if r.status_code in (401, 403):
+                    self.disabled_reason = f"xAI API отклонил ключ ({r.status_code}) — используется запасной анализ"
+                    self.last_error = self.disabled_reason
+                    raise LLMError(self.disabled_reason)
+                if r.status_code in _RETRY_STATUSES:
+                    last = LLMError(f"xAI API status {r.status_code}: {r.text[:200]}")
+                elif r.status_code >= 400:
+                    raise LLMError(f"xAI API status {r.status_code}: {r.text[:300]}")
+                else:
+                    try:
+                        data = r.json()
+                        msg = data["choices"][0]["message"]
+                        text = msg.get("content") or ""
+                    except (ValueError, KeyError, IndexError, TypeError) as e:
+                        raise LLMError(f"unexpected xAI response: {e!r}") from e
+                    if isinstance(text, list):  # на случай content-частей
+                        text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
+                    if not str(text).strip():
+                        raise LLMError(f"empty response (finish_reason={data['choices'][0].get('finish_reason')})")
+                    return str(text)
+            if attempt < self.retries:
+                await asyncio.sleep(min(0.5 * 2 ** attempt, 4.0))
+        self.last_error = str(last)
+        raise last or LLMError("xAI request failed")
+
+    # -- контракт ------------------------------------------------------------
     async def complete_json(self, system, user, schema_hint=None, *, task=None,
                             temperature=0.2, max_tokens=None) -> dict[str, Any]:
-        sys_prompt = system
+        sys_prompt = system + "\n\nОтвечай ТОЛЬКО одним валидным JSON-объектом, без пояснений."
         if schema_hint is not None:
             hint = schema_hint if isinstance(schema_hint, str) else json.dumps(schema_hint, ensure_ascii=False, indent=1)
             sys_prompt += "\n\nФормат ответа — JSON такой структуры:\n" + hint
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
-        last_err: Exception | None = None
+        messages: list[dict[str, Any]] = [{"role": "system", "content": sys_prompt},
+                                          {"role": "user", "content": user}]
         try:
-            for attempt in range(2):
-                text = await self._raw(sys_prompt, messages, task=task, max_tokens=max_tokens)
+            last_err: Exception | None = None
+            for _ in range(2):
+                text = await self._chat(messages, json_mode=True, temperature=temperature, max_tokens=max_tokens)
                 try:
                     data = extract_json(text)
                 except ValueError as e:
@@ -170,24 +204,27 @@ class AnthropicLLM(LLMClient):
                 last_err = ValueError("JSON is not an object")
             raise LLMError(f"invalid JSON after retry: {last_err}")
         except LLMError as e:
-            if not self.fallback_to_mock:
+            self.last_error = str(e)
+            if not self.fallback:
                 raise
-            log.warning("AnthropicLLM task=%s failed (%s) — fallback to MockLLM", task, e)
-            return await self._mock.complete_json(system, user, schema_hint, task=task)
+            log.warning("GrokLLM task=%s failed (%s) — fallback to %s", task, e, self._get_fallback().name)
+            return await self._get_fallback().complete_json(system, user, schema_hint, task=task)
 
     async def complete_text(self, system, user, *, task=None, temperature=0.5,
                             max_tokens=None) -> str:
         try:
-            return await self._raw(system, [{"role": "user", "content": user}], task=task, max_tokens=max_tokens)
+            return await self._chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
+                                    json_mode=False, temperature=temperature, max_tokens=max_tokens)
         except LLMError as e:
-            if not self.fallback_to_mock:
+            self.last_error = str(e)
+            if not self.fallback:
                 raise
-            log.warning("AnthropicLLM text task=%s failed (%s) — fallback to MockLLM", task, e)
-            return await self._mock.complete_text(system, user, task=task)
+            log.warning("GrokLLM text task=%s failed (%s) — fallback to %s", task, e, self._get_fallback().name)
+            return await self._get_fallback().complete_text(system, user, task=task)
 
     async def aclose(self) -> None:
         if self._client is not None:
-            await self._client.close()
+            await self._client.aclose()
             self._client = None
 
 
@@ -523,16 +560,17 @@ _llm: LLMClient | None = None
 
 
 def get_llm() -> LLMClient:
-    """Синглтон-фабрика. LLM_PROVIDER=auto → AnthropicLLM при наличии ANTHROPIC_API_KEY,
-    иначе MockLLM. Тесты могут подменить через ``set_llm(MockLLM())``."""
+    """Синглтон-фабрика. LLM_PROVIDER: grok | extractive | mock | auto (auto → GrokLLM при наличии
+    XAI_API_KEY; иначе demo → MockLLM, live → ExtractiveLLM). Тесты подменяют через ``set_llm``."""
     global _llm
     if _llm is None:
         from app.config import settings
 
         prov = settings.LLM_PROVIDER
-        if prov in ("anthropic", "auto") and settings.ANTHROPIC_API_KEY:
-            _llm = AnthropicLLM(settings.ANTHROPIC_API_KEY, settings.LLM_MODEL, settings.LLM_TIMEOUT)
-        elif prov == "mock" or (prov in ("auto", "anthropic") and settings.is_demo):
+        if prov in ("grok", "auto") and settings.XAI_API_KEY:
+            _llm = GrokLLM(settings.XAI_API_KEY, settings.XAI_MODEL, base_url=settings.XAI_BASE_URL,
+                           timeout=settings.LLM_TIMEOUT, max_tokens=settings.LLM_MAX_TOKENS)
+        elif prov == "mock" or (prov in ("auto", "grok") and settings.is_demo):
             _llm = MockLLM()
         else:  # live без ключа или явно extractive — без выдуманных фактов (TZ_v3 п.5)
             from app.ai.extractive import ExtractiveLLM
